@@ -118,7 +118,7 @@ class Game:
                 n += self.get_armies(r)
         return n
 
-    def regions_owned_by(self, player: int) -> list[int]:
+    def regions_owned_by(self, player: int) -> list[Region]:
         owned_regions = []
         for region in self.world.regions:
             if self.get_owner(region) == player:
@@ -137,6 +137,7 @@ class Game:
                 return False
         return True
 
+    @dispatch(int, bool)
     def armies_per_turn(self, player: int, first: bool) -> int:
         armies = 5
         if first and self.config.num_players == 2:
@@ -146,11 +147,14 @@ class Game:
                 armies += cd.reward
         return armies
 
-    def armies_per_tun(self, player: int) -> int:
+    @dispatch(int)
+    def armies_per_turn(self, player: int) -> int:
         return self.armies_per_turn(player, player == 1 and self.round <= 1)
 
+    @dispatch(int)
     def armies_each_turn(self, player: int) -> int:
         return self.armies_per_turn(player, False)
+
 
     def num_starting_regions(self):
         return (self.world.num_continents() / self.config.num_players) if self.config.warlords else 4

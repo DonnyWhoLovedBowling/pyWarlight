@@ -21,6 +21,12 @@ class AgentBase:
     def attack_transfer(self, game: Game) -> list[AttackTransfer]:
         pass
 
+    def init(self, timeout_millis: int):
+        pass
+
+    def terminate(self):
+        pass
+
     def get_move(self, game: Game) -> Move:
         if game.phase == Phase.STARTING_REGION:
             return self.choose_region(game)
