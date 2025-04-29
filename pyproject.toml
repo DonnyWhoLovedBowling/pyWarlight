@@ -1,0 +1,10 @@
+[project]
+name = "pywarlight"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "multipledispatch==1.0.0",
+    "svgelements==1.9.6",
+    "svgpathtools==1.6.1",
+]
