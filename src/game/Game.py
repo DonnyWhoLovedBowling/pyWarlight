@@ -1,6 +1,6 @@
 import math
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.game.Continent import Continent
 from src.game.FightSide import FightSide
@@ -14,7 +14,7 @@ from datetime import datetime
 from multipledispatch import dispatch
 from logging import warning
 
-from src.game.move import Move
+from src.game.move.Move import Move
 from src.game.move.AttackTransfer import AttackTransfer
 
 
@@ -45,7 +45,8 @@ class FightResult:
 @dataclass
 class Game:
     config: GameConfig
-    world: World = World()
+    world: World = field(default_factory=lambda: World())
+
     armies: list[int] = None
     owner: list[int] = None
     round: int = 0
@@ -57,8 +58,9 @@ class Game:
     def __post_init__(self):
         if self.config is None:
             self.config = GameConfig()
+        self.world = World()
         self.armies = [2] * self.world.num_regions()
-        self.owner = [] * self.world.num_regions()
+        self.owner = [-1] * self.world.num_regions()
         self.score = [-1] * (self.config.num_players+1)
         self.turn = 1
         random.seed(datetime.now().timestamp())
@@ -160,9 +162,10 @@ class Game:
         return (self.world.num_continents() / self.config.num_players) if self.config.warlords else 4
 
     def borders_enemy(self, region: Region, player: int) -> bool:
-        for n in  region.get_neighbours():
+        for n in region.get_neighbours():
             owner = self.get_owner(n)
-            if owner != player and owner != 0:
+            if owner != player and owner != -1:
+                print('border enemy: ', owner, player)
                 return True
         return False
 
@@ -171,17 +174,26 @@ class Game:
         for s in continent.get_regions():
             if self.get_owner(s) == player:
                 count += 1
+                print(continent.name, s.name, player, self.get_owner(s))
         return count
 
     def get_random_starting_region(self, player) -> Region:
-        for p in range(2):
+        for p in range(1, 3):
             possible = []
             for r in self.pickable_regions:
-                if (self.regions_on_continent(r, player) < 2 and
+                if (self.regions_on_continent(r.get_continent(), player) < 2 and
                     ((not self.borders_enemy(r, player)) or p == 2)):
                     possible.append(r)
-                if len(possible) > 0:
-                    return random.choice(possible)
+                else:
+                    pass
+                    # print('not possible region: ', r.name)
+                    # print(self.regions_on_continent(r.get_continent(), player), r.get_continent())
+                    # print(self.borders_enemy(r, player))
+                    # print(p)
+
+            if len(possible) > 0:
+                # print('possible!', possible)
+                return random.choice(possible)
         raise Exception('No possible starting region')
 
     def set_as_starting(self, r: Region, player: int) -> None:
@@ -269,7 +281,7 @@ class Game:
         valid = []
         if self.phase != Phase.PLACE_ARMIES:
             self.illegal_move('wrong time to place armies')
-        left = self.armies_per_tun(self.turn)
+        left = self.armies_per_turn(self.turn)
         for move in moves:
             region = move.get_region()
             armies = move.get_armies()

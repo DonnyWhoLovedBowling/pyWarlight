@@ -1,5 +1,5 @@
 from src.game.Game import Game
-from src.game.move import Move
+from src.game.move.Move import Move
 from src.game.move.AttackTransfer import AttackTransfer
 
 from dataclasses import dataclass

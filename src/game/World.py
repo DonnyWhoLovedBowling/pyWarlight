@@ -1,7 +1,7 @@
-from dataclasses import dataclass
+from line_profiler_pycharm import profile
 
 from svgelements import SVG, Group, Desc, Path, Move, Line, QuadraticBezier, CubicBezier, Close, Point, SVGElement, Text
-from svgpathtools import svg2paths, wsvg, svg2paths2
+from svgpathtools import svg2paths2
 from src.game.Continent import Continent
 from src.game.Region import Region
 from src.utils.Util import to_global, is_point_in_path
@@ -22,11 +22,13 @@ def get_child_by_name(e: SVG, name: str) -> Group:
     raise Exception(f'Could not find child with name: {name}')
 
 
-@dataclass
 class World:
-    continents: list[Continent] = None
-    regions: list[Region] = None
-    diagram: SVG = SVGElement()
+
+    def __init__(self):
+        self.continents: list[Continent] = []
+        self.regions: list[Region] = []
+        self.diagram: SVG = SVG()
+        self.read_svg()
 
     def read_svg(self):
         paths, attributes, svg_attributes = svg2paths2('C:\\Users\\pcvan\\Projects\\Warlight\\res\\maps\\earth.svg')
@@ -37,7 +39,7 @@ class World:
 
         _map = get_child_by_name(self.diagram, 'map')
         _map_desc = self.create_regions(_map)
-
+        out_file = open("world.txt", "w")
         self.find_neighbors()
         if _map_desc is not None:
             for line in _map_desc.splitlines():
@@ -53,9 +55,12 @@ class World:
                     r = self.get_region(name1)
                     name2 = line[i + 1:].strip()
                     s = self.get_region(name2)
+                    r.add_neighbour(s)
+                    self.regions.append(r)
+
 
         self.find_labels()
-        self.find_rewards()
+        # self.find_rewards()
 
     def create_regions(self, _map: Group):
         map_desc = None
@@ -121,7 +126,7 @@ class World:
 
                             i = 2
                         elif isinstance(segment, Close):
-                            print("Close Path")
+                            pass
                         else:
                             print(f"Unknown segment", type(segment))
                         if do_bounding_boxes_intersect(sp.bbox(), (coords[i] - dist, coords[i + 1] - dist, 2 * dist, 2 * dist)):
@@ -147,7 +152,6 @@ class World:
             p = Point(float(e.values['x']), float(e.values['y']))
             p = to_global(e, p)
             for r in self.regions:
-                print(text)
                 s = to_global(r.path, p)
                 if is_point_in_path(r.path, s):
                     r.set_label_position(s)

@@ -17,14 +17,15 @@ class AgentConfig:
 
 @dataclass
 class Config:
-    agent_configs = list[AgentConfig]
+    agent_configs: list[AgentConfig] = None
     timeout_millis = 60000
     visualize = False
     game_config = GameConfig()
     game_config.num_players = 0
 
     def __post_init__(self):
-        self.agent_configs.append(AgentConfig('neutral', 'neutral', 0))
+
+        self.agent_configs = [AgentConfig('neutral', 'neutral', 0)]
 
     def is_human(self, player: int) -> bool:
         return self.agent_configs[player].init == 'human'
@@ -32,12 +33,19 @@ class Config:
     def add_agent(self, name: str):
         _id = None
         extra_armies = 0
+        if '=' in name:
+            ix = name.index('=')
+        else:
+            ix = -1
 
-        ix = name.index('=')
         if ix >= 0:
             _id = name[ix+1:]
             name = name[0:ix+1]
-        ix = name.index('+')
+        if '+' in name:
+            ix = name.index('+')
+        else:
+            ix = -1
+
         if ix >= 0:
             extra_armies = int(name[ix+1])
             name = name[0:ix+1]
@@ -46,7 +54,7 @@ class Config:
                 _id = 'You'
             name = 'human'
         else:
-            if _id is None:
+            if _id is None and '.' in name:
                 _id = name[name.rindex('.')+1]
             name = f'internal: {name}'
         self.agent_configs.append(AgentConfig(_id, name, extra_armies))
@@ -56,7 +64,7 @@ class Config:
         self.add_agent('human')
 
     def player_name(self, player: int):
-        self.agent_configs[player].name
+        return self.agent_configs[player].name
 
     def full_name(self, player: int):
         self.agent_configs[player].full_name()
@@ -75,3 +83,6 @@ class Config:
         for p in range(1, self.num_players()+1):
             sb += f";{self.full_name(p)}"
         return self.game_config.get_csv() + ';' + str(self.timeout_millis) + sb
+
+    def agent_init(self, i):
+        return self.agent_configs[i].init

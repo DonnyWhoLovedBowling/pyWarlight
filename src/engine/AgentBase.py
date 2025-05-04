@@ -1,7 +1,5 @@
 from src.game.Game import Game
 from src.game.Phase import Phase
-from src.game.Region import Region
-from src.game.Continent import Continent
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.AttackTransferMove import AttackTransferMove
 from src.game.move.Move import Move

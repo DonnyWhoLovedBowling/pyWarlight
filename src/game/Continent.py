@@ -1,5 +1,8 @@
 from dataclasses import  dataclass
+
 from svgelements import Group
+
+
 
 @dataclass
 class Continent:
@@ -12,7 +15,7 @@ class Continent:
     def get_id(self):
         return self.id
 
-    def get_regions(self):
+    def get_regions(self) -> list:
         return self.regions
 
     def get_name(self):

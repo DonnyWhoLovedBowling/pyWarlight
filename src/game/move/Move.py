@@ -1,5 +1,4 @@
-from src.game.Game import Game
 class Move:
 
-    def apply(self, game: Game, mostLikely: bool):
+    def apply(self, game, mostLikely: bool):
         pass

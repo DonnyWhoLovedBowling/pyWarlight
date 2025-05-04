@@ -4,6 +4,16 @@ from src.engine.Config import Config
 from src.game.Game import Game
 
 
+def get_csv_header(num_players: int) -> str:
+    sb = ""
+    for p in range(1, num_players + 1):
+        sb += f"p{p}Score;"
+    sb += 'rounds'
+    for p in range(1, num_players + 1):
+        sb += f";p{p}Regions;p{p}Armies"
+    return sb
+
+
 @dataclass
 class GameResult:
     def __init__(self, config: Config, game: Game, total_moves: list[int], total_time: list[int]) -> None:
@@ -20,16 +30,6 @@ class GameResult:
         self.winner: int = game.winning_player()
         self.score: list[int] = game.score
         self.round: int = game.round
-
-    def get_csv_header(self) -> str:
-        num_players = self.config.num_players()
-        sb = ""
-        for p in range(1, num_players + 1):
-            sb += f"p{p}Score;"
-        sb += 'rounds'
-        for p in range(1, num_players + 1):
-            sb += f";p{p}Regions;p{p}Armies"
-        return sb
 
     def get_csv(self):
         sb = ""

@@ -1,7 +1,9 @@
-from src.game.Continent import Continent
 from dataclasses import dataclass
 from typing import Self
 from svgelements import Path
+
+from src.game.Continent import Continent
+
 
 @dataclass
 class Region:
@@ -9,16 +11,19 @@ class Region:
     name: str
     id: int
     continent: Continent
-    neighbours: set[Self] = None
+    neighbours: list[Self] = None
     label_position: tuple[int,int] = 0,0
 
+    def __post_init__(self):
+        self.neighbours = list()
+        
     def get_id(self) -> int:
         return self.id
 
     def get_continent(self) -> Continent:
         return self.continent
 
-    def get_neighbours(self) -> set[Self]:
+    def get_neighbours(self) -> list[Self]:
         return self.neighbours
 
     def get_name(self) -> str:
@@ -30,7 +35,7 @@ class Region:
         return self.label_position
 
     def add_neighbour(self, neighbour: Self):
-        self.neighbours.add(neighbour)
+        self.neighbours.append(neighbour)
 
     def set_label_position(self, s):
         self.label_position = s
