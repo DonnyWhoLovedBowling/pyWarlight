@@ -1,5 +1,4 @@
 import logging
-from copy import deepcopy
 from logging import error, debug
 from time import time
 
