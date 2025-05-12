@@ -57,15 +57,9 @@ class RandomAgent(AgentBase):
                 raise ValueError(f"No armies on region {r.name}")
             if count > 0:
                 neighbors = r.get_neighbours()
-                try:
-                    to = random.choice(list(neighbors))
-                except IndexError:
-                    ValueError(f"neighbours of {r.name}: {list(neighbors)}")
-                to_armies = game.get_armies(to)
+                to = random.choice(list(neighbors))
                 ret.append(AttackTransfer(r, to, count))
         return ret
 
     def terminate(self):
-        logging.info(f"agent terminated")
-
-
+        logging.info("agent terminated")

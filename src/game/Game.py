@@ -33,9 +33,16 @@ class FightResult:
     winner: FightSide = FightSide.ATTACKER
 
     def post_process(self, attacking_armies: int, defending_armies: int):
-        if self.attackers_destroyed == attacking_armies and self.defenders_destroyed == defending_armies:
+        if (
+            self.attackers_destroyed == attacking_armies
+            and self.defenders_destroyed == defending_armies
+        ):
             self.defenders_destroyed -= 1
-        self.winner = FightSide.ATTACKER if self.defenders_destroyed >= defending_armies else FightSide.DEFENDER
+        self.winner = (
+            FightSide.ATTACKER
+            if self.defenders_destroyed >= defending_armies
+            else FightSide.DEFENDER
+        )
 
 
 @dataclass
@@ -52,12 +59,9 @@ class Game:
     pickable_regions: list[Region] = field(default_factory=lambda: [])
 
     def __post_init__(self):
-        # if self.config is None:
-        #     self.config = GameConfig()
-        # self.world = World()
         self.armies = [2] * self.world.num_regions()
         self.owner = [-1] * self.world.num_regions()
-        self.score = [-1] * (self.config.num_players+1)
+        self.score = [-1] * (self.config.num_players + 1)
         self.turn = 1
         random.seed(datetime.now().timestamp())
         self.init_starting_regions()
@@ -91,9 +95,9 @@ class Game:
             self.score[old] = _max + 1
 
             if self.score[old] == self.config.num_players - 2:
-                for p in range(1, self.config.num_players+1):
-                    if self.score[p] == - 1:
-                        self.score[p] = self.config.num_players -1
+                for p in range(1, self.config.num_players + 1):
+                    if self.score[p] == -1:
+                        self.score[p] = self.config.num_players - 1
                         break
 
     def get_armies(self, region: Region) -> int:
@@ -147,7 +151,7 @@ class Game:
         armies = 5
         if first and self.config.num_players == 2:
             armies = 3
-        for cd  in self.world.continents:
+        for cd in self.world.continents:
             if self.get_owner(cd) == player:
                 armies += cd.reward
         return armies
@@ -160,9 +164,12 @@ class Game:
     def armies_each_turn(self, player: int) -> int:
         return self.armies_per_turn(player, False)
 
-
     def num_starting_regions(self):
-        return (self.world.num_continents() / self.config.num_players) if self.config.warlords else 4
+        return (
+            (self.world.num_continents() / self.config.num_players)
+            if self.config.warlords
+            else 4
+        )
 
     def borders_enemy(self, region: Region, player: int) -> bool:
         for n in region.get_neighbours():
@@ -185,14 +192,15 @@ class Game:
             possible = []
             for r in self.pickable_regions:
                 # print(f'checking if {r.get_id()} is pickable')
-                if (self.regions_on_continent(r.get_continent(), player) < 2 and
-                    ((not self.borders_enemy(r, player)) or p == 2)):
+                if self.regions_on_continent(r.get_continent(), player) < 2 and (
+                    (not self.borders_enemy(r, player)) or p == 2
+                ):
                     possible.append(r)
 
             if len(possible) > 0:
                 # print('possible!', possible)
                 return random.choice(possible)
-        raise Exception('No possible starting region')
+        raise Exception("No possible starting region")
 
     def set_as_starting(self, r: Region, player: int) -> None:
         self.set_owner(r, player)
@@ -245,8 +253,11 @@ class Game:
                             if self.score[p] == -1:
                                 r = self.number_of_regions_owned(p)
                                 a = self.number_of_armies_owned(p)
-                                if (min_player == -1 or r < min_regions
-                                        or (r == min_regions and a < min_armies)):
+                                if (
+                                    min_player == -1
+                                    or r < min_regions
+                                    or (r == min_regions and a < min_armies)
+                                ):
                                     min_player = p
                                     min_regions = r
                                     min_armies = a
@@ -259,10 +270,10 @@ class Game:
 
     def choose_region(self, r: Region) -> None:
         if self.phase != Phase.STARTING_REGION:
-            raise Exception('cannot choose regions after game has begun')
+            raise Exception("cannot choose regions after game has begun")
 
         if r not in self.pickable_regions:
-            raise Exception('starting region is not pickable')
+            raise Exception("starting region is not pickable")
 
         self.set_as_starting(r, self.turn)
         self.turn += 1
@@ -278,35 +289,48 @@ class Game:
     def place_armies(self, moves: list[Move]) -> None:
         valid = []
         if self.phase != Phase.PLACE_ARMIES:
-            self.illegal_move(f'wrong time to place armies {self.phase}')
+            self.illegal_move(f"wrong time to place armies {self.phase}")
         left = self.armies_per_turn(self.turn)
         for move in moves:
             region = move.get_region()
             armies = move.get_armies()
 
             if not self.is_owned_by(region, self.turn):
-                self.illegal_move(f"can't place armies on unowned region {region.get_name()}")
+                self.illegal_move(
+                    f"can't place armies on unowned region {region.get_name()}"
+                )
             elif armies < 1:
                 self.illegal_move("cannot place less than 1 army")
             elif left <= 0:
-                self.illegal_move(f"no {armies} armies left to place {left} {self.turn}")
+                self.illegal_move(
+                    f"no {armies} armies left to place {left} {self.turn}"
+                )
             else:
                 if armies > left:
-                    self.illegal_move(f"move wants to place {armies} armies, but only {left} are available")
+                    self.illegal_move(
+                        f"move wants to place {armies} armies, but only {left} are available"
+                    )
                 self.set_armies(region, self.get_armies(region) + armies)
                 left -= armies
                 valid.append(move)
         self.phase = Phase.ATTACK_TRANSFER
 
     @dispatch(int, int, bool)
-    def do_attack(self, attacking_armies: int, defending_armies: int, most_likely: bool) -> FightResult:
+    def do_attack(
+        self, attacking_armies: int, defending_armies: int, most_likely: bool
+    ) -> FightResult:
         result = FightResult()
-        result.defenders_destroyed = min(manual_round(attacking_armies * 0.6, most_likely), defending_armies)
-        result.attackers_destroyed = min(manual_round(defending_armies * 0.7, most_likely), attacking_armies)
-
+        result.defenders_destroyed = min(
+            manual_round(attacking_armies * 0.6, most_likely), defending_armies
+        )
+        result.attackers_destroyed = min(
+            manual_round(defending_armies * 0.7, most_likely), attacking_armies
+        )
 
         result.post_process(attacking_armies, defending_armies)
-        logging.debug(f"attacked, defenders destroyed: {result.defenders_destroyed}, attackers: {result.attackers_destroyed}")
+        logging.debug(
+            f"attacked, defenders destroyed: {result.defenders_destroyed}, attackers: {result.attackers_destroyed}"
+        )
         logging.debug(f"defenders: {defending_armies}, attackers: {attacking_armies}")
 
         logging.debug(f"{result.winner} won!")
@@ -314,25 +338,33 @@ class Game:
         return result
 
     @dispatch(AttackTransfer, bool)
-    def do_attack(self, move: AttackTransfer , most_likely: bool ):
+    def do_attack(self, move: AttackTransfer, most_likely: bool):
         from_region = move.get_from_region()
         to_region = move.get_to_region()
         attacking_armies = move.get_armies()
         defending_armies = self.get_armies(to_region)
         result = self.do_attack(attacking_armies, defending_armies, most_likely)
         if result.winner == FightSide.ATTACKER:
-            self.set_armies(from_region, self.get_armies(from_region) - attacking_armies)
+            self.set_armies(
+                from_region, self.get_armies(from_region) - attacking_armies
+            )
             self.set_owner(to_region, self.turn)
             self.set_armies(to_region, attacking_armies - result.attackers_destroyed)
         elif result.winner == FightSide.DEFENDER:
-            self.set_armies(from_region, self.get_armies(from_region) - result.attackers_destroyed)
-            self.set_armies(to_region, self.get_armies(to_region) - result.defenders_destroyed)
+            self.set_armies(
+                from_region, self.get_armies(from_region) - result.attackers_destroyed
+            )
+            self.set_armies(
+                to_region, self.get_armies(to_region) - result.defenders_destroyed
+            )
         else:
             raise Exception("Unhandled FightResult.winner: " + result.winner)
 
-    def validate_attack_transfers(self, moves: list[AttackTransfer]) -> list[AttackTransfer]:
+    def validate_attack_transfers(
+        self, moves: list[AttackTransfer]
+    ) -> list[AttackTransfer]:
         valid = []
-        total_from = [0]*self.world.num_regions()
+        total_from = [0] * self.world.num_regions()
         for i in range(len(moves)):
             m = moves[i]
             from_region = m.get_from_region()
@@ -340,18 +372,28 @@ class Game:
             if not self.is_owned_by(from_region, self.turn):
                 self.illegal_move("attack/transfer from unowned region")
             elif to_region not in from_region.get_neighbours():
-                self.illegal_move(f"attack/transfer from {from_region.get_neighbours()} to region {to_region.name} that is not a neighbor")
+                self.illegal_move(
+                    f"attack/transfer from {from_region.get_neighbours()} to region {to_region.name} that is not a neighbor"
+                )
             elif m.get_armies() < 1:
                 self.illegal_move("attack/transfer cannot use less than 1 army")
-            elif total_from[from_region.get_id()] + m.get_armies() >= self.get_armies(from_region):
-                self.illegal_move("attack/transfer requests more armies than are available")
+            elif total_from[from_region.get_id()] + m.get_armies() >= self.get_armies(
+                from_region
+            ):
+                self.illegal_move(
+                    "attack/transfer requests more armies than are available"
+                )
             else:
                 ok = True
                 for j in range(0, i):
                     n: AttackTransfer = moves[j]
-                    if (n.get_from_region() == m.get_from_region() and
-                        n.get_to_region() == m.get_from_region()):
-                        self.illegal_move("player has already moved between same regions in this turn")
+                    if (
+                        n.get_from_region() == m.get_from_region()
+                        and n.get_to_region() == m.get_from_region()
+                    ):
+                        self.illegal_move(
+                            "player has already moved between same regions in this turn"
+                        )
                         ok = False
                         break
                 if ok:
@@ -372,8 +414,12 @@ class Game:
             if self.is_owned_by(to_region, self.turn):
                 if _move.get_armies() == self.get_armies(from_region):
                     raise ValueError("moving all armies!")
-                self.set_armies(from_region, self.get_armies(from_region) - _move.get_armies())
-                self.set_armies(to_region, self.get_armies(to_region) + _move.get_armies())
+                self.set_armies(
+                    from_region, self.get_armies(from_region) - _move.get_armies()
+                )
+                self.set_armies(
+                    to_region, self.get_armies(to_region) + _move.get_armies()
+                )
             else:
                 self.do_attack(_move, most_likely)
                 if self.is_done():
@@ -400,8 +446,3 @@ class Game:
             self.place_armies([place])
         elif self.phase == Phase.ATTACK_TRANSFER:
             self.attack_transfer([], False)
-
-
-
-
-

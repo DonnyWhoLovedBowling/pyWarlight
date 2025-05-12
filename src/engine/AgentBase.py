@@ -1,5 +1,3 @@
-import logging
-
 from src.game.Game import Game
 from src.game.Phase import Phase
 from src.game.move.AttackTransfer import AttackTransfer
@@ -10,7 +8,6 @@ from src.game.move.PlaceArmiesMove import PlaceArmiesMove
 
 
 class AgentBase:
-
 
     def choose_region(self, game: Game) -> Move:
         pass
@@ -36,4 +33,3 @@ class AgentBase:
             return AttackTransferMove(self.attack_transfer(game))
         else:
             raise NotImplementedError
-

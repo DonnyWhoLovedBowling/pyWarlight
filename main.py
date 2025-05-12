@@ -1,21 +1,21 @@
-from src.engine.AgentBase import AgentBase
 from src.engine.Config import Config
 from src.engine.Engine import Engine
 from src.tournament.WarlightFight import WarlightFight
 
 import sys
 
-def simulate_games(config: Config, agents: list[str], seed: int,
-                   games: int, result_dir: str, verbose: bool):
 
-    if len(agents) < 2:
+def simulate_games(_config: Config, _agents: list[str], _seed: int,
+                   games: int, _result_dir: str, _verbose: bool):
+
+    if len(_agents) < 2:
         raise Exception("Must have at least 2 agents")
 
-    config.visualize = False
-    for a in agents:
-        config.add_agent(a)
-    fight = WarlightFight(config, max(seed, 0), games, result_dir)
-    fight.fight(verbose)
+    _config.visualize = False
+    for a in _agents:
+        _config.add_agent(a)
+    fight = WarlightFight(_config, max(_seed, 0), games, _result_dir)
+    fight.fight(_verbose)
 
 if __name__ == "__main__":
     agents = []
