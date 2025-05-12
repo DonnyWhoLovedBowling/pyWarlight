@@ -3,7 +3,7 @@ from dataclasses import dataclass
 @dataclass
 class GameConfig:
     extra_armies: list[int] = None
-    max_game_rounds: int = 100
+    max_game_rounds: int = 5000
     num_players: int = 2
     manual_distribution:bool = False
     warlords: bool = False

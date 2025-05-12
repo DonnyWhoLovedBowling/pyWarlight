@@ -1,5 +1,7 @@
-from line_profiler_pycharm import profile
+import logging
 
+from line_profiler_pycharm import profile
+import os
 from svgelements import SVG, Group, Desc, Path, Move, Line, QuadraticBezier, CubicBezier, Close, Point, SVGElement, Text
 from svgpathtools import svg2paths2
 from src.game.Continent import Continent
@@ -28,19 +30,68 @@ class World:
         self.continents: list[Continent] = []
         self.regions: list[Region] = []
         self.diagram: SVG = SVG()
-        self.read_svg()
+        if os.path.isfile("world.txt"):
+            continent_map = dict()
+            region_map = dict()
+            infile = open("world.txt", 'r')
+            read_continents = True
+            read_regions = False
+            read_edges = False
+            for line in infile.readlines():
+                args = line.split(";")
+                if read_continents:
+                    if line == "\n":
+                        read_continents = False
+                        read_regions = True
+                        continue
+                    cont = Continent(args[1], int(args[0]), int(args[2]))
+                    continent_map[cont.id] = cont
+                    self.continents.append(cont)
+                if read_regions:
+                    if line == "\n":
+                        read_regions = False
+                        read_edges = True
+                        continue
+                    try:
+                        # region = Region(Path(), args[1], int(args[0]), continent_map[int(args[2])])
+                        region = Region(args[1], int(args[0]), continent_map[int(args[2])])
 
+                    except KeyError:
+                        logging.error(f"not found {args[0]}")
+                        raise KeyError(args[0])
+                    self.regions.append(region)
+                    region_map[int(args[0])] = region
+                if read_edges:
+                    if line == "\n":
+                        continue
+                    region_map[int(args[0])].add_neighbour(region_map[int(args[1])])
+                    region_map[int(args[1])].add_neighbour(region_map[int(args[0])])
+
+        else:
+            self.read_svg()
+        logging.debug("read world file.")
     def read_svg(self):
-        paths, attributes, svg_attributes = svg2paths2('C:\\Users\\pcvan\\Projects\\Warlight\\res\\maps\\earth.svg')
+        world_path='res\\maps\\earth.svg'
+        paths, attributes, svg_attributes = svg2paths2(world_path)
         # print(svg_attributes)
-        f_name = "C:\\Users\\pcvan\\Projects\\Warlight\\res\\maps\\earth.svg"
+        f_name = world_path
 
         self.diagram = SVG.parse(f_name)
 
         _map = get_child_by_name(self.diagram, 'map')
         _map_desc = self.create_regions(_map)
-        out_file = open("world.txt", "w")
+        out_file = open("world.txt", "a")
+        for c in self.continents:
+            out_file.write(f"{c.id};{c.name};{c.get_reward()} \n")
+        out_file.write("\n")
+        for r in self.regions:
+            out_file.write(f"{r.id};{r.name};{r.continent.id} \n")
+        out_file.write("\n")
+        out_file.close()
         self.find_neighbors()
+
+
+
         if _map_desc is not None:
             for line in _map_desc.splitlines():
                 line = line.strip()
@@ -74,7 +125,9 @@ class World:
                 for child in e:
                     if type(child) == Path:
                         p = child
-                        r = Region(p, p.values['title'], len(self.regions), c)
+                        # r = Region(p, p.values['title'], len(self.regions), c)
+                        r = Region(p.values['title'], len(self.regions), c)
+
                         self.regions.append(r)
                         c.add_region(r)
                     elif type(child) == Desc:
@@ -91,7 +144,9 @@ class World:
 
     def find_neighbors(self):
         dist: int= 3
+        unique_neighbors = set()
         coords: list = [0.0] * 6  # Python list to store coordinates
+        out_file = open("world.txt", "a")
         for r in self.regions:
             rp = r.path
             for s in self.regions:
@@ -129,9 +184,16 @@ class World:
                             pass
                         else:
                             print(f"Unknown segment", type(segment))
-                        if do_bounding_boxes_intersect(sp.bbox(), (coords[i] - dist, coords[i + 1] - dist, 2 * dist, 2 * dist)):
+                        # if do_bounding_boxes_intersect(sp.bbox(), (coords[i] - dist, coords[i + 1] - dist, 2 * dist, 2 * dist)):
+                        if do_bounding_boxes_intersect(sp.bbox(), rp.bbox()) and (r.id, s.id) not in unique_neighbors:
+
                             r.add_neighbour(s)
                             s.add_neighbour(r)
+                            unique_neighbors.add((r.id, s.id))
+                            out_file.write(f"{r.id};{s.id} \n")
+                            # print(f"neighbor! {r.name} {s.name}")
+
+        out_file.close()
 
     def get_region(self, name):
         for r in self.regions:

@@ -33,9 +33,9 @@ class GameResult:
 
     def get_csv(self):
         sb = ""
-        for p in range(1, self.config.num_players() + 1):
+        for p in range(1, self.config.num_players()):
             sb += f"{self.score[p]};"
         sb += f'{self.round}'
-        for p in range(1, self.config.num_players() + 1):
+        for p in range(1, self.config.num_players()):
             sb += f";{self.regions[p]};{self.armies[p]};"
         return sb

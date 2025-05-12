@@ -1,3 +1,5 @@
+import logging
+
 from src.game.Game import Game
 from src.game.Phase import Phase
 from src.game.move.AttackTransfer import AttackTransfer

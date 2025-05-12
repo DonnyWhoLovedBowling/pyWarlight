@@ -11,8 +11,8 @@ class AttackTransferMove(Move):
     def __eq__(self, other):
         return self.commands == other.commands
 
-    def apply(self, game: Game, mostLikely: bool):
-        game.attack_transfer(self.commands, mostLikely)
+    def apply(self, game: Game, most_likely: bool):
+        game.attack_transfer(self.commands, most_likely)
 
     def __str__(self):
         return ", ".join(map(str, self.commands))

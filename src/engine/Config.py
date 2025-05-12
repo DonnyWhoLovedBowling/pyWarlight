@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 
 from src.game.GameConfig import GameConfig
@@ -80,7 +81,7 @@ class Config:
 
     def get_csv(self):
         sb = ''
-        for p in range(1, self.num_players()+1):
+        for p in range(1, self.num_players()):
             sb += f";{self.full_name(p)}"
         return self.game_config.get_csv() + ';' + str(self.timeout_millis) + sb
 

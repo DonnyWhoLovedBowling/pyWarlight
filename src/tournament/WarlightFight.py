@@ -18,20 +18,20 @@ class WarlightFight:
     def report_totals(self, res: TotalResults, total_time: list[int], total_moves: list[int], verbose: bool):
 
         num_players = self.config.num_players()
-        for p in range(1, num_players + 1):
+        for p in range(1, num_players):
             if p > 1:
                 logging.info(', ')
             logging.info(f'{self.config.full_name(p)} = {res.total_victories[p]} ({100*res.total_victories[p]:.2f}%)')
 
         if num_players > 2 and verbose:
             logging.info('average score: ')
-            for p in range(1, num_players + 1):
+            for p in range(1, num_players):
                 if p > 1:
                     logging.info(', ')
                 logging.info(
                     f'{self.config.full_name(p)} = {res.total_scores[p]/self.games}')
 
-        for p in range(1, num_players + 1):
+        for p in range(1, num_players):
             if p > 1:
                 logging.info(', ')
             logging.info(f"{self.config.full_name(p)} took {total_time[p]/total_moves[p]} ms/move")
@@ -97,7 +97,7 @@ class WarlightFight:
             logging.info("")
 
             total_results.total_victories[result.winner] += 1
-            for p in range(1, num_players + 1):
+            for p in range(1, num_players ):
                 total_results.total_scores[p] += result.score[p]
 
             if out_file is not None:

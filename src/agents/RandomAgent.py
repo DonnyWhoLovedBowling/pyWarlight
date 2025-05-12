@@ -1,6 +1,11 @@
+import logging
 import random
 import time
-from typing import override
+import sys
+if sys.version_info[1] < 11:
+    from typing_extensions import override
+else:
+    from typing import override
 
 from src.engine.AgentBase import AgentBase
 from src.game.Game import Game
@@ -26,7 +31,10 @@ class RandomAgent(AgentBase):
         available = game.armies_per_turn(me)
         mine = game.regions_owned_by(me)
         num_regions = len(mine)
-        count = [] * num_regions
+        count = [0] * num_regions
+        if num_regions == 0:
+            logging.error(f'agent {me} has no regions!')
+            raise ValueError
         for i in range(available):
             r = random.randint(0, num_regions - 1)
             count[r] += 1
@@ -37,16 +45,27 @@ class RandomAgent(AgentBase):
         return ret
 
     def attack_transfer(self, game: Game) -> list[AttackTransfer]:
+
         me = game.turn
         ret = []
 
         for r in game.regions_owned_by(me):
-            count = random.randrange(game.get_armies(r))
+            regional_armies =  game.get_armies(r)
+            if regional_armies > 0:
+                count = random.randrange(0, regional_armies)
+            else:
+                raise ValueError(f"No armies on region {r.name}")
             if count > 0:
                 neighbors = r.get_neighbours()
-                to = random.choice(list(neighbors))
+                try:
+                    to = random.choice(list(neighbors))
+                except IndexError:
+                    ValueError(f"neighbours of {r.name}: {list(neighbors)}")
+                to_armies = game.get_armies(to)
                 ret.append(AttackTransfer(r, to, count))
         return ret
 
+    def terminate(self):
+        logging.info(f"agent terminated")
 
 

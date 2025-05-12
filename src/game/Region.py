@@ -1,5 +1,10 @@
+import sys
+if sys.version_info[1] < 11:
+    from typing_extensions import Self
+else:
+    from typing import Self
+
 from dataclasses import dataclass
-from typing import Self
 from svgelements import Path
 
 from src.game.Continent import Continent
@@ -7,7 +12,7 @@ from src.game.Continent import Continent
 
 @dataclass
 class Region:
-    path: Path
+    # path: Path
     name: str
     id: int
     continent: Continent
@@ -16,6 +21,7 @@ class Region:
 
     def __post_init__(self):
         self.neighbours = list()
+        self.continent.add_region(self)
         
     def get_id(self) -> int:
         return self.id

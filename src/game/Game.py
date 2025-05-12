@@ -1,3 +1,4 @@
+import logging
 import math
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,14 +13,9 @@ from src.game.Phase import Phase
 import random, datetime
 from datetime import datetime
 from multipledispatch import dispatch
-from logging import warning
 
 from src.game.move.Move import Move
 from src.game.move.AttackTransfer import AttackTransfer
-
-
-def is_owned_by(region: Region, player: int) -> bool:
-    return region.get_id() == player
 
 
 def manual_round(d: float, most_likely: bool) -> int:
@@ -47,18 +43,18 @@ class Game:
     config: GameConfig
     world: World = field(default_factory=lambda: World())
 
-    armies: list[int] = None
-    owner: list[int] = None
+    armies: list[int] = field(default_factory=lambda: [])
+    owner: list[int] = field(default_factory=lambda: [])
     round: int = 0
     turn: int = 0
-    phase: Phase = None
-    score: list[int] = None
-    pickable_regions: list[Region] = None
+    phase: Phase = field(default_factory=lambda: [])
+    score: list[int] = field(default_factory=lambda: [])
+    pickable_regions: list[Region] = field(default_factory=lambda: [])
 
     def __post_init__(self):
-        if self.config is None:
-            self.config = GameConfig()
-        self.world = World()
+        # if self.config is None:
+        #     self.config = GameConfig()
+        # self.world = World()
         self.armies = [2] * self.world.num_regions()
         self.owner = [-1] * self.world.num_regions()
         self.score = [-1] * (self.config.num_players+1)
@@ -105,6 +101,8 @@ class Game:
 
     def set_armies(self, r: Region, n: int) -> None:
         self.armies[r.get_id()] = n
+        if n == 0:
+            raise ValueError(f"setting armies for region {r.name} to {n}")
 
     def number_of_regions_owned(self, player: int) -> int:
         n = 0
@@ -120,10 +118,14 @@ class Game:
                 n += self.get_armies(r)
         return n
 
+    def is_owned_by(self, region: Region, player: int) -> bool:
+        return self.owner[region.get_id()] == player
+
     def regions_owned_by(self, player: int) -> list[Region]:
         owned_regions = []
         for region in self.world.regions:
-            if self.get_owner(region) == player:
+            owner = self.get_owner(region)
+            if owner == player:
                 owned_regions.append(region)
         return owned_regions
 
@@ -135,6 +137,7 @@ class Game:
 
     def is_done(self) -> bool:
         for p in range(1, self.config.num_players + 1):
+            logging.debug(f"score {p}: {self.score[p]}")
             if self.score[p] == -1:
                 return False
         return True
@@ -165,31 +168,26 @@ class Game:
         for n in region.get_neighbours():
             owner = self.get_owner(n)
             if owner != player and owner != -1:
-                print('border enemy: ', owner, player)
                 return True
         return False
 
     def regions_on_continent(self, continent: Continent, player: int) -> int:
         count = 0
         for s in continent.get_regions():
+            if s.continent.id != continent.id:
+                continue
             if self.get_owner(s) == player:
                 count += 1
-                print(continent.name, s.name, player, self.get_owner(s))
         return count
 
     def get_random_starting_region(self, player) -> Region:
         for p in range(1, 3):
             possible = []
             for r in self.pickable_regions:
+                # print(f'checking if {r.get_id()} is pickable')
                 if (self.regions_on_continent(r.get_continent(), player) < 2 and
                     ((not self.borders_enemy(r, player)) or p == 2)):
                     possible.append(r)
-                else:
-                    pass
-                    # print('not possible region: ', r.name)
-                    # print(self.regions_on_continent(r.get_continent(), player), r.get_continent())
-                    # print(self.borders_enemy(r, player))
-                    # print(p)
 
             if len(possible) > 0:
                 # print('possible!', possible)
@@ -232,9 +230,9 @@ class Game:
         self.phase = Phase.PLACE_ARMIES
 
     def next_turn(self):
-
         while True:
             self.turn += 1
+            logging.debug(f"doing turn {self.turn}, round: {self.round}")
             if self.turn > self.config.num_players:
                 self.turn = 1
                 self.round += 1
@@ -275,41 +273,44 @@ class Game:
             self.regions_chosen()
 
     def illegal_move(self, s: str):
-        warning(f"ignoring illegal move by player {self.turn}: {s} ")
+        raise ValueError(f"ignoring illegal move by player {self.turn}: {s} ")
 
-    def place_armies(self, moves: list) -> None:
+    def place_armies(self, moves: list[Move]) -> None:
         valid = []
         if self.phase != Phase.PLACE_ARMIES:
-            self.illegal_move('wrong time to place armies')
+            self.illegal_move(f'wrong time to place armies {self.phase}')
         left = self.armies_per_turn(self.turn)
         for move in moves:
             region = move.get_region()
             armies = move.get_armies()
 
-            if not is_owned_by(region, True):
-                self.illegal_move(f"can't place armies on unowned region {region.getName()}")
+            if not self.is_owned_by(region, self.turn):
+                self.illegal_move(f"can't place armies on unowned region {region.get_name()}")
             elif armies < 1:
                 self.illegal_move("cannot place less than 1 army")
             elif left <= 0:
-                self.illegal_move("no armies left to place")
+                self.illegal_move(f"no {armies} armies left to place {left} {self.turn}")
             else:
                 if armies > left:
                     self.illegal_move(f"move wants to place {armies} armies, but only {left} are available")
-                move.set_armies(left)
-                armies = left
-
-            left -= armies
-            self.set_armies(region, self.get_armies(region) + armies)
-            valid.append(move)
+                self.set_armies(region, self.get_armies(region) + armies)
+                left -= armies
+                valid.append(move)
         self.phase = Phase.ATTACK_TRANSFER
 
     @dispatch(int, int, bool)
     def do_attack(self, attacking_armies: int, defending_armies: int, most_likely: bool) -> FightResult:
         result = FightResult()
-        result.defenders_destroyed = int(min(manual_round(attacking_armies * 0.6, most_likely), defending_armies))
-        result.attackers_destroyed = int(min(manual_round(defending_armies * 0.7, most_likely), attacking_armies))
+        result.defenders_destroyed = min(manual_round(attacking_armies * 0.6, most_likely), defending_armies)
+        result.attackers_destroyed = min(manual_round(defending_armies * 0.7, most_likely), attacking_armies)
+
 
         result.post_process(attacking_armies, defending_armies)
+        logging.debug(f"attacked, defenders destroyed: {result.defenders_destroyed}, attackers: {result.attackers_destroyed}")
+        logging.debug(f"defenders: {defending_armies}, attackers: {attacking_armies}")
+
+        logging.debug(f"{result.winner} won!")
+
         return result
 
     @dispatch(AttackTransfer, bool)
@@ -317,8 +318,7 @@ class Game:
         from_region = move.get_from_region()
         to_region = move.get_to_region()
         attacking_armies = move.get_armies()
-        defending_armies = move.get_armies()
-
+        defending_armies = self.get_armies(to_region)
         result = self.do_attack(attacking_armies, defending_armies, most_likely)
         if result.winner == FightSide.ATTACKER:
             self.set_armies(from_region, self.get_armies(from_region) - attacking_armies)
@@ -337,10 +337,10 @@ class Game:
             m = moves[i]
             from_region = m.get_from_region()
             to_region = m.get_to_region()
-            if not is_owned_by(from_region, self.turn):
+            if not self.is_owned_by(from_region, self.turn):
                 self.illegal_move("attack/transfer from unowned region")
-            elif to_region not in from_region.get_regions():
-                self.illegal_move("attack/transfer to region that is not a neighbor")
+            elif to_region not in from_region.get_neighbours():
+                self.illegal_move(f"attack/transfer from {from_region.get_neighbours()} to region {to_region.name} that is not a neighbor")
             elif m.get_armies() < 1:
                 self.illegal_move("attack/transfer cannot use less than 1 army")
             elif total_from[from_region.get_id()] + m.get_armies() >= self.get_armies(from_region):
@@ -369,7 +369,9 @@ class Game:
             from_region = _move.get_from_region()
             to_region = _move.get_to_region()
             _move.set_armies(min(_move.get_armies(), self.get_armies(from_region) - 1))
-            if is_owned_by(to_region.get_id(), self.turn):
+            if self.is_owned_by(to_region, self.turn):
+                if _move.get_armies() == self.get_armies(from_region):
+                    raise ValueError("moving all armies!")
                 self.set_armies(from_region, self.get_armies(from_region) - _move.get_armies())
                 self.set_armies(to_region, self.get_armies(to_region) + _move.get_armies())
             else:
@@ -383,7 +385,7 @@ class Game:
     def move(self, _move: Move, most_likely: bool) -> None:
         _move.apply(self, most_likely)
 
-    @dispatch(Move, bool)
+    @dispatch(Move)
     def move(self, _move: Move) -> None:
         self.move(_move, False)
 
@@ -394,7 +396,7 @@ class Game:
         elif self.phase == Phase.PLACE_ARMIES:
             owned = self.regions_owned_by(self.turn)
             r = random.choice(owned)
-            place = PlaceArmies(r, self.armies_per_tun(self.turn))
+            place = PlaceArmies(r, self.armies_per_turn(self.turn))
             self.place_armies([place])
         elif self.phase == Phase.ATTACK_TRANSFER:
             self.attack_transfer([], False)

@@ -5,16 +5,15 @@ from src.tournament.WarlightFight import WarlightFight
 
 import sys
 
-def simulate_games(config: Config, agents: list[AgentBase], seed: int,
+def simulate_games(config: Config, agents: list[str], seed: int,
                    games: int, result_dir: str, verbose: bool):
 
     if len(agents) < 2:
         raise Exception("Must have at least 2 agents")
 
     config.visualize = False
-    for s in agents:
-        config.add_agent(s)
-
+    for a in agents:
+        config.add_agent(a)
     fight = WarlightFight(config, max(seed, 0), games, result_dir)
     fight.fight(verbose)
 
@@ -57,7 +56,7 @@ if __name__ == "__main__":
             elif s == "-warlords":
                 config.game_config.warlords = True
             else:
-                raise Exception("Invalid argument")
+                raise Exception("Invalid argument", s)
         else:
             agents.append(sys.argv[i])
     if len(agents) > 4:

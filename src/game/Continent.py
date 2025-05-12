@@ -1,4 +1,5 @@
-from dataclasses import  dataclass
+import logging
+from dataclasses import  dataclass, field
 
 from svgelements import Group
 
@@ -9,8 +10,9 @@ class Continent:
     name: str
     id: int
     reward: int = 0
-    regions = []
-    reward_element = Group
+    regions: list = field(default_factory= lambda: [])
+
+    # reward_element = Group
 
     def get_id(self):
         return self.id
@@ -28,5 +30,8 @@ class Continent:
         self.reward = reward
 
     def add_region(self, region):
+        if region.continent.id != self.id:
+            logging.error("wrong region added!")
+            raise ValueError
         self.regions.append(region)
 
