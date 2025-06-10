@@ -3,8 +3,10 @@ import math
 from copy import deepcopy
 from dataclasses import dataclass, field
 
+from src.engine.AgentBase import AgentBase
 from src.game.Continent import Continent
 from src.game.FightSide import FightSide
+from src.game.move.FigthResult import FightResult
 from src.game.move.PlaceArmies import PlaceArmies
 from src.game.Region import Region
 from src.game.GameConfig import GameConfig
@@ -15,6 +17,7 @@ from datetime import datetime
 from multipledispatch import dispatch
 
 from src.game.move.Move import Move
+
 from src.game.move.AttackTransfer import AttackTransfer
 
 
@@ -27,29 +30,9 @@ def manual_round(d: float, most_likely: bool) -> int:
 
 
 @dataclass
-class FightResult:
-    attackers_destroyed: int = 0
-    defenders_destroyed: int = 0
-    winner: FightSide = FightSide.ATTACKER
-
-    def post_process(self, attacking_armies: int, defending_armies: int):
-        if (
-            self.attackers_destroyed == attacking_armies
-            and self.defenders_destroyed == defending_armies
-        ):
-            self.defenders_destroyed -= 1
-        self.winner = (
-            FightSide.ATTACKER
-            if self.defenders_destroyed >= defending_armies
-            else FightSide.DEFENDER
-        )
-
-
-@dataclass
 class Game:
     config: GameConfig
     world: World = field(default_factory=lambda: World())
-
     armies: list[int] = field(default_factory=lambda: [])
     owner: list[int] = field(default_factory=lambda: [])
     round: int = 0
@@ -137,7 +120,8 @@ class Game:
         for p in range(1, self.config.num_players + 1):
             if self.score[p] == self.config.num_players - 1:
                 return p
-        raise Exception("No winning player")
+        logging.warning("No winning player")
+        return -1
 
     def is_done(self) -> bool:
         for p in range(1, self.config.num_players + 1):
@@ -151,9 +135,7 @@ class Game:
         armies = 5
         if first and self.config.num_players == 2:
             armies = 3
-        for cd in self.world.continents:
-            if self.get_owner(cd) == player:
-                armies += cd.reward
+        armies += self.get_bonus_armies(player)
         return armies
 
     @dispatch(int)
@@ -286,7 +268,7 @@ class Game:
     def illegal_move(self, s: str):
         raise ValueError(f"ignoring illegal move by player {self.turn}: {s} ")
 
-    def place_armies(self, moves: list[Move]) -> None:
+    def place_armies(self, moves: list[PlaceArmies]) -> None:
         valid = []
         if self.phase != Phase.PLACE_ARMIES:
             self.illegal_move(f"wrong time to place armies {self.phase}")
@@ -328,6 +310,7 @@ class Game:
         )
 
         result.post_process(attacking_armies, defending_armies)
+        logging.debug(f"agent {self.turn} attacked")
         logging.debug(
             f"attacked, defenders destroyed: {result.defenders_destroyed}, attackers: {result.attackers_destroyed}"
         )
@@ -338,7 +321,7 @@ class Game:
         return result
 
     @dispatch(AttackTransfer, bool)
-    def do_attack(self, move: AttackTransfer, most_likely: bool):
+    def do_attack(self, move: AttackTransfer, most_likely: bool) -> FightResult:
         from_region = move.get_from_region()
         to_region = move.get_to_region()
         attacking_armies = move.get_armies()
@@ -359,6 +342,7 @@ class Game:
             )
         else:
             raise Exception("Unhandled FightResult.winner: " + result.winner)
+        return result
 
     def validate_attack_transfers(
         self, moves: list[AttackTransfer]
@@ -373,7 +357,7 @@ class Game:
                 self.illegal_move("attack/transfer from unowned region")
             elif to_region not in from_region.get_neighbours():
                 self.illegal_move(
-                    f"attack/transfer from {from_region.get_neighbours()} to region {to_region.name} that is not a neighbor"
+                    f"attack/transfer from {from_region.name} to region {to_region.name} that is not a neighbor"
                 )
             elif m.get_armies() < 1:
                 self.illegal_move("attack/transfer cannot use less than 1 army")
@@ -381,7 +365,8 @@ class Game:
                 from_region
             ):
                 self.illegal_move(
-                    "attack/transfer requests more armies than are available"
+                    f"attack/transfer requests more armies ({total_from[from_region.get_id()]} + "
+                    f"{m.get_armies()}) than are available ({self.get_armies(from_region)})"
                 )
             else:
                 ok = True
@@ -421,11 +406,11 @@ class Game:
                     to_region, self.get_armies(to_region) + _move.get_armies()
                 )
             else:
-                self.do_attack(_move, most_likely)
+                _move.result = self.do_attack(_move, most_likely)
                 if self.is_done():
                     return
         self.next_turn()
-        self.phase = Phase.PLACE_ARMIES
+        self.phase = Phase.END_MOVE
 
     @dispatch(Move, bool)
     def move(self, _move: Move, most_likely: bool) -> None:
@@ -446,3 +431,39 @@ class Game:
             self.place_armies([place])
         elif self.phase == Phase.ATTACK_TRANSFER:
             self.attack_transfer([], False)
+
+    def create_army_input_list(self) -> list[list[int]]:
+        graph = []
+        for r in self.world.regions:
+            x_list = [0] * (self.config.num_players + 2)
+            owner = self.get_owner(r)
+            if owner == -1:
+                owner_ix = 2
+            else:
+                owner_ix = owner - 1
+            x_list[owner_ix] = 1
+            x_list[-1] = self.get_armies(r)
+            graph.append(x_list)
+        return graph
+
+    def create_action_edges(self) -> list[list[int]]:
+        action_edges = []
+        for src in self.regions_owned_by(self.turn):
+            if self.get_armies(src) > 1:
+                for tgt in src.get_neighbours():
+                    action_edges.append([src.get_id(), tgt.get_id()])
+                action_edges.append([src.get_id(), src.get_id()])
+        return action_edges
+
+    def end_move(self, agent: AgentBase):
+        if self.phase != Phase.END_MOVE:
+            raise ValueError("not the right moment to end move!")
+        agent.end_move(self)
+        self.phase = Phase.PLACE_ARMIES
+
+    def get_bonus_armies(self, player):
+        armies = 0
+        for cd in self.world.continents:
+            if self.get_owner(cd) == player:
+                armies += cd.reward
+        return armies

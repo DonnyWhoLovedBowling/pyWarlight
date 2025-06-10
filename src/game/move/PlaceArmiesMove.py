@@ -1,8 +1,7 @@
 from dataclasses import dataclass
-
-from src.game.Game import Game
 from src.game.move.Move import Move
 from src.game.move.PlaceArmies import PlaceArmies
+
 
 @dataclass
 class PlaceArmiesMove(Move):
@@ -14,17 +13,16 @@ class PlaceArmiesMove(Move):
 
         return self.commands == other.commands
 
-    def apply(self, state: Game, most_likely: bool):
+    def apply(self, state, most_likely: bool):
         state.place_armies(self.commands)
 
     def __str__(self):
-        sb = 'PlaceArmiesMove('
+        sb = "PlaceArmiesMove("
         for i in range(len(self.commands)):
             if i > 0:
-                sb += ', '
+                sb += ", "
             p = self.commands[i]
-            sb += p.region.name + ' = ' + str(p.armies)
+            sb += p.region.name + " = " + str(p.armies)
 
-        sb += ')'
+        sb += ")"
         return sb
-

@@ -4,8 +4,8 @@ from src.game.GameConfig import GameConfig
 
 @dataclass()
 class AgentConfig:
-    name: str
     init: str
+    name: str
     extra_armies: int
 
     def full_name(self):
@@ -57,7 +57,8 @@ class Config:
             if _id is None and "." in name:
                 _id = name[name.rindex(".") + 1]
             name = f"internal: {name}"
-        self.agent_configs.append(AgentConfig(_id, name, extra_armies))
+        ag = AgentConfig(name, _id, extra_armies)
+        self.agent_configs.append(ag)
         self.game_config.add_player(extra_armies)
 
     def add_human(self):

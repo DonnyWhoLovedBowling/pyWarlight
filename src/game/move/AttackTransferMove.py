@@ -1,8 +1,8 @@
-from src.game.Game import Game
 from src.game.move.Move import Move
 from src.game.move.AttackTransfer import AttackTransfer
 
 from dataclasses import dataclass
+
 
 @dataclass
 class AttackTransferMove(Move):
@@ -11,7 +11,7 @@ class AttackTransferMove(Move):
     def __eq__(self, other):
         return self.commands == other.commands
 
-    def apply(self, game: Game, most_likely: bool):
+    def apply(self, game, most_likely: bool):
         game.attack_transfer(self.commands, most_likely)
 
     def __str__(self):

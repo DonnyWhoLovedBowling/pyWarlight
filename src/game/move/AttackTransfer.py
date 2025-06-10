@@ -1,17 +1,21 @@
+from src.game.move.FigthResult import FightResult
 from src.game.Region import Region
 from dataclasses import dataclass
+
 
 @dataclass
 class AttackTransfer:
     from_region: Region
     to_region: Region
     armies: int
+    result: FightResult = FightResult()
 
     def __eq__(self, other):
-        return (self.to_region == other.to_region and
-                self.from_region == other.from_region and
-                self.armies == other.armies)
-
+        return (
+            self.to_region == other.to_region
+            and self.from_region == other.from_region
+            and self.armies == other.armies
+        )
 
     def set_armies(self, armies):
         self.armies = armies
@@ -26,4 +30,6 @@ class AttackTransfer:
         return self.armies
 
     def __str__(self):
-        return f"attack/transfer with {self.armies} armies from {self.from_region} to {self.to_region}",
+        return (
+            f"attack/transfer with {self.armies} armies from {self.from_region} to {self.to_region}",
+        )

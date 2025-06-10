@@ -2,5 +2,6 @@ svgelements
 multipledispatch
 statsmodels
 line-profiler-pycharm
-svgpathtools
-svgelements
+
+torch
+torch_geometric

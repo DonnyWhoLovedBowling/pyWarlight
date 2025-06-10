@@ -1,35 +1,51 @@
-from src.game.Game import Game
 from src.game.Phase import Phase
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.AttackTransferMove import AttackTransferMove
+from src.game.move.EndMove import EndMove
 from src.game.move.Move import Move
 from src.game.move.PlaceArmies import PlaceArmies
 from src.game.move.PlaceArmiesMove import PlaceArmiesMove
 
 
 class AgentBase:
+    agent_number: int
 
-    def choose_region(self, game: Game) -> Move:
+    def is_rl_bot(self):
+        return False
+
+    def choose_region(self, game) -> Move:
         pass
 
-    def place_armies(self, game: Game) -> list[PlaceArmies]:
+    def place_armies(self, game) -> list[PlaceArmies]:
         pass
 
-    def attack_transfer(self, game: Game) -> list[AttackTransfer]:
+    def attack_transfer(self, game) -> list[AttackTransfer]:
         pass
 
     def init(self, timeout_millis: int):
         pass
 
-    def terminate(self):
+    def terminate(self, game):
         pass
 
-    def get_move(self, game: Game) -> Move:
+    def init_turn(self, game):
+        pass
+
+    def get_move(self, game) -> AttackTransferMove | Move | PlaceArmiesMove | None:
         if game.phase == Phase.STARTING_REGION:
             return self.choose_region(game)
         elif game.phase == Phase.PLACE_ARMIES:
             return PlaceArmiesMove(self.place_armies(game))
         elif game.phase == Phase.ATTACK_TRANSFER:
             return AttackTransferMove(self.attack_transfer(game))
+        elif game.phase == Phase.END_MOVE:
+            return EndMove(self)
+
         else:
             raise NotImplementedError
+
+    def compute_action_log_prob(self):
+        pass
+
+    def end_move(self, game):
+        pass

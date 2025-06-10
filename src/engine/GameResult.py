@@ -8,7 +8,7 @@ def get_csv_header(num_players: int) -> str:
     sb = ""
     for p in range(1, num_players + 1):
         sb += f"p{p}Score;"
-    sb += 'rounds'
+    sb += "rounds"
     for p in range(1, num_players + 1):
         sb += f";p{p}Regions;p{p}Armies"
     return sb
@@ -16,7 +16,9 @@ def get_csv_header(num_players: int) -> str:
 
 @dataclass
 class GameResult:
-    def __init__(self, config: Config, game: Game, total_moves: list[int], total_time: list[int]) -> None:
+    def __init__(
+        self, config: Config, game: Game, total_moves: list[int], total_time: list[int]
+    ) -> None:
 
         self.config: Config = config
         self.total_moves: list[int] = total_moves
@@ -35,7 +37,7 @@ class GameResult:
         sb = ""
         for p in range(1, self.config.num_players()):
             sb += f"{self.score[p]};"
-        sb += f'{self.round}'
+        sb += f"{self.round}"
         for p in range(1, self.config.num_players()):
             sb += f";{self.regions[p]};{self.armies[p]};"
         return sb

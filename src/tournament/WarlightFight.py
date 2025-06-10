@@ -8,6 +8,7 @@ from src.engine.Engine import Engine
 from src.engine.GameResult import get_csv_header
 from src.tournament.TotalResults import TotalResults
 
+
 @dataclass
 class WarlightFight:
     config: Config
@@ -15,28 +16,42 @@ class WarlightFight:
     games: int
     result_dir: str
 
-    def report_totals(self, res: TotalResults, total_time: list[int], total_moves: list[int], verbose: bool):
+    def __post_init__(self):
+        logging.getLogger().setLevel(logging.INFO)
+
+    def report_totals(
+        self,
+        res: TotalResults,
+        total_time: list[int],
+        total_moves: list[int],
+        verbose: bool,
+    ):
 
         num_players = self.config.num_players()
         for p in range(1, num_players):
             if p > 1:
-                logging.info(', ')
-            logging.info(f'{self.config.full_name(p)} = {res.total_victories[p]} ({100*res.total_victories[p]:.2f}%)')
+                logging.info(", ")
+            logging.info(
+                f"{self.config.full_name(p)} = {res.total_victories[p]} ({100*res.total_victories[p]:.2f}%)"
+            )
 
         if num_players > 2 and verbose:
-            logging.info('average score: ')
+            logging.info("average score: ")
             for p in range(1, num_players):
                 if p > 1:
-                    logging.info(', ')
+                    logging.info(", ")
                 logging.info(
-                    f'{self.config.full_name(p)} = {res.total_scores[p]/self.games}')
+                    f"{self.config.full_name(p)} = {res.total_scores[p]/self.games}"
+                )
 
         for p in range(1, num_players):
             if p > 1:
-                logging.info(', ')
-            logging.info(f"{self.config.full_name(p)} took {total_time[p]/total_moves[p]} ms/move")
+                logging.info(", ")
+            logging.info(
+                f"{self.config.full_name(p)} took {total_time[p]/total_moves[p]} ms/move"
+            )
 
-        logging.info('')
+        logging.info("")
 
         if self.games == 1:
             return
@@ -46,8 +61,12 @@ class WarlightFight:
             logging.info(f"with {confidence}: confidence")
             for p in range(1, num_players + 1):
                 confidence_level = confidence / 100.0
-                lower_bound, upper_bound = proportion.proportion_confint(res.total_victories[p], self.games,
-                                                                         alpha=1 - confidence_level, method='wilson')
+                lower_bound, upper_bound = proportion.proportion_confint(
+                    res.total_victories[p],
+                    self.games,
+                    alpha=1 - confidence_level,
+                    method="wilson",
+                )
 
                 lo = lower_bound * 100
                 hi = upper_bound * 100
@@ -59,7 +78,9 @@ class WarlightFight:
         try:
             out_file = open("matches.csv", "w")
             out_file.write(f"datetime;{self.config.get_csv_header()} \n")
-            out_file.write(f"{datetime.datetime.now()};{self.config.get_csv()};{self.base_seed};{res.get_csv()}")
+            out_file.write(
+                f"{datetime.datetime.now()};{self.config.get_csv()};{self.base_seed};{res.get_csv()}"
+            )
         except BaseException:
             logging.exception("failed to write matches.csv")
 
@@ -67,21 +88,27 @@ class WarlightFight:
         num_players = self.config.num_players()
         total_results: TotalResults = TotalResults(num_players, self.games)
         total_moves = [0] * (num_players + 1)
-        total_time = [0.] * (num_players + 1)
+        total_time = [0.0] * (num_players + 1)
         out_file = None
 
         if self.result_dir is not None:
             out_file = open("matches.csv", "w")
-            out_file.write(f"datetime;{self.config.get_csv_header()};seed;{get_csv_header(num_players)} \n")
+            out_file.write(
+                f"datetime;{self.config.get_csv_header()};seed;{get_csv_header(num_players)} \n"
+            )
 
         for game in range(self.games):
+            logging.info(f"starting game {game}")
             seed = self.base_seed + game
             self.config.game_config.seed = seed
             result = Engine(config=self.config).run(verbose=verbose)
             for p in range(1, num_players + 1):
                 total_moves[p] += result.total_moves[p]
                 total_time[p] += result.total_time[p]
-            logging.info(f"seed {seed}: {self.config.full_name(result.winner)} won in {result.round} rounds")
+
+            logging.info(
+                f"seed {seed}: {self.config.agent_configs[result.winner]} won in {result.round} rounds"
+            )
             if verbose and num_players > 2:
                 logging.info(" (")
                 for i in range(2, num_players + 1):
@@ -95,13 +122,15 @@ class WarlightFight:
                     logging.info(f"{i} = {self.config.full_name(p)}")
                 logging.info(")")
             logging.info("")
-
-            total_results.total_victories[result.winner] += 1
-            for p in range(1, num_players ):
+            if result.winner != -1:
+                total_results.total_victories[result.winner] += 1
+            for p in range(1, num_players):
                 total_results.total_scores[p] += result.score[p]
 
             if out_file is not None:
-                out_file.write(f"{datetime.datetime.now()};{self.config.get_csv()}; {seed}; {result.get_csv()}\n")
+                out_file.write(
+                    f"{datetime.datetime.now()};{self.config.get_csv()}; {seed}; {result.get_csv()}\n"
+                )
 
         if out_file is not None:
             out_file.close()

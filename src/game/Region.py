@@ -1,4 +1,5 @@
 import sys
+
 if sys.version_info[1] < 11:
     from typing_extensions import Self
 else:
@@ -17,12 +18,12 @@ class Region:
     id: int
     continent: Continent
     neighbours: list[Self] = None
-    label_position: tuple[int,int] = 0,0
+    label_position: tuple[int, int] = 0, 0
 
     def __post_init__(self):
         self.neighbours = list()
         self.continent.add_region(self)
-        
+
     def get_id(self) -> int:
         return self.id
 
@@ -35,7 +36,7 @@ class Region:
     def get_name(self) -> str:
         return self.name
 
-    def get_label_position(self) -> tuple[int,int]:
+    def get_label_position(self) -> tuple[int, int]:
         if self.label_position is None:
             raise Exception(f"Region {self.get_name()} position is None")
         return self.label_position
@@ -46,66 +47,5 @@ class Region:
     def set_label_position(self, s):
         self.label_position = s
 
-#     public Point labelPosition; // in global coordinates
-#
-#     private List < Region > neighbours = new ArrayList < Region > ();
-#
-#     def Region(self, Path svgElement, String name, int id, Continent continent) {
-#     this.svgElement = svgElement;
-#     this.name = name;
-#     this.id = id;
-#     this.continent = continent;
-#     svgElement = []
-#
-#
-#     def getId(self) -> int
-#         return id;
-#
-#
-# public
-# Continent
-# getContinent()
-# {
-# return continent;
-# }
-#
-# public
-# String
-# getName()
-# {
-# return name;
-# }
-#
-# public
-# void
-# setLabelPosition(Point
-# p) {
-# labelPosition = p;
-# }
-#
-# public
-# Point
-# getLabelPosition()
-# {
-# if (labelPosition == null)
-#     throw
-#     new
-#     Error("region '" + name + "' has no label position");
-#
-# return labelPosition;
-# }
-#
-# public
-# void
-# addNeighbor(Region
-# r) {
-# if (!neighbours.contains(r))
-# neighbours.add(r);
-# }
-#
-# public
-# List < Region > getNeighbors()
-# {
-# return neighbours;
-# }
-# }
+    def __repr__(self):
+        return self.name
