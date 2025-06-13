@@ -32,7 +32,7 @@ def manual_round(d: float, most_likely: bool) -> int:
 @dataclass
 class Game:
     config: GameConfig
-    world: World = field(default_factory=lambda: World())
+    world: World
     armies: list[int] = field(default_factory=lambda: [])
     owner: list[int] = field(default_factory=lambda: [])
     round: int = 0
@@ -147,11 +147,16 @@ class Game:
         return self.armies_per_turn(player, False)
 
     def num_starting_regions(self):
-        return (
-            (self.world.num_continents() / self.config.num_players)
-            if self.config.warlords
-            else 4
-        )
+        n_regions = 0
+        if self.config.warlords:
+            n_regions = (self.world.num_continents() / self.config.num_players)
+        elif len(self.world.regions) < 5:
+            n_regions = 1
+        elif len(self.world.regions) <= 12:
+            n_regions = 2
+        else:
+            n_regions = 4
+        return n_regions
 
     def borders_enemy(self, region: Region, player: int) -> bool:
         for n in region.get_neighbours():
@@ -174,9 +179,9 @@ class Game:
             possible = []
             for r in self.pickable_regions:
                 # print(f'checking if {r.get_id()} is pickable')
-                if self.regions_on_continent(r.get_continent(), player) < 2 and (
+                if (self.regions_on_continent(r.get_continent(), player) < 2 and (
                     (not self.borders_enemy(r, player)) or p == 2
-                ):
+                )) or len(self.world.regions) < 12:
                     possible.append(r)
 
             if len(possible) > 0:
@@ -212,7 +217,8 @@ class Game:
         else:
             self.pickable_regions = deepcopy(self.world.regions)
 
-        for i in range(self.num_starting_regions()):
+        n_starting = self.num_starting_regions()
+        for i in range(n_starting):
             for p in range(1, self.config.num_players + 1):
                 r = self.get_random_starting_region(p)
                 self.set_as_starting(r, p)

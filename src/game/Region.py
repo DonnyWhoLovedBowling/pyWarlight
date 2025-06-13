@@ -6,7 +6,7 @@ else:
     from typing import Self
 
 from dataclasses import dataclass
-from svgelements import Path
+# from svgelements import Path
 
 from src.game.Continent import Continent
 

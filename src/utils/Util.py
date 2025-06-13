@@ -1,4 +1,4 @@
-from svgelements import SVGElement, Path, Point, Matrix, Line
+# from svgelements import SVGElement, Path, Point, Matrix, Line
 
 
 def to_global(element: SVGElement, point: Point):

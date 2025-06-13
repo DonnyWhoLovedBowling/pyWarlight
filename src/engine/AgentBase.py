@@ -6,6 +6,7 @@ from src.game.move.Move import Move
 from src.game.move.PlaceArmies import PlaceArmies
 from src.game.move.PlaceArmiesMove import PlaceArmiesMove
 
+import logging
 
 class AgentBase:
     agent_number: int
@@ -29,7 +30,12 @@ class AgentBase:
         pass
 
     def init_turn(self, game):
-        pass
+        if game.round < 3:
+            logging.info(f"turn {game.round} started")
+            for p in range(1, game.config.num_players + 1):
+                logging.info(
+                    f"player {p} owns {len(game.regions_owned_by(p))} regions and {game.number_of_armies_owned(p)} armies"
+                )
 
     def get_move(self, game) -> AttackTransferMove | Move | PlaceArmiesMove | None:
         if game.phase == Phase.STARTING_REGION:

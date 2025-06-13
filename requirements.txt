@@ -1,4 +1,3 @@
-svgelements
 multipledispatch
 statsmodels
 line-profiler-pycharm

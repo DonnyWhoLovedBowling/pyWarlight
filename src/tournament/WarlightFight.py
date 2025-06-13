@@ -76,7 +76,8 @@ class WarlightFight:
             return
 
         try:
-            out_file = open("matches.csv", "w")
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            out_file = open(f"total_results_{ts}.csv", "w")
             out_file.write(f"datetime;{self.config.get_csv_header()} \n")
             out_file.write(
                 f"{datetime.datetime.now()};{self.config.get_csv()};{self.base_seed};{res.get_csv()}"
@@ -86,22 +87,24 @@ class WarlightFight:
 
     def fight(self, verbose: bool) -> TotalResults:
         num_players = self.config.num_players()
-        total_results: TotalResults = TotalResults(num_players, self.games)
+        total_results: TotalResults = TotalResults(num_players, 100)
         total_moves = [0] * (num_players + 1)
         total_time = [0.0] * (num_players + 1)
         out_file = None
 
         if self.result_dir is not None:
-            out_file = open("matches.csv", "w")
+            out_file = open("matches.csv", "a")
             out_file.write(
                 f"datetime;{self.config.get_csv_header()};seed;{get_csv_header(num_players)} \n"
             )
-
+        engine = Engine(self.config)
+        if len(engine.World.regions) < 10:
+            self.config.agent_configs = self.config.agent_configs[-1:]
         for game in range(self.games):
             logging.info(f"starting game {game}")
             seed = self.base_seed + game
             self.config.game_config.seed = seed
-            result = Engine(config=self.config).run(verbose=verbose)
+            result = engine.run(verbose=verbose)
             for p in range(1, num_players + 1):
                 total_moves[p] += result.total_moves[p]
                 total_time[p] += result.total_time[p]
@@ -131,8 +134,10 @@ class WarlightFight:
                 out_file.write(
                     f"{datetime.datetime.now()};{self.config.get_csv()}; {seed}; {result.get_csv()}\n"
                 )
-
+            if game % 100 == 0:
+                self.report_totals(total_results, total_time, total_moves, verbose)
+                total_results: TotalResults = TotalResults(num_players, 100)
         if out_file is not None:
             out_file.close()
-        self.report_totals(total_results, total_time, total_moves, verbose)
+
         return total_results

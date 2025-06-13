@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as f
 from torch_geometric.nn import GCNConv
+from datetime import datetime
 
 from src.engine.AgentBase import AgentBase
 
@@ -26,6 +27,13 @@ from src.game.Region import Region
 
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.PlaceArmies import PlaceArmies
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else
+    "mps" if torch.backends.mps.is_available() else
+    "cpu"
+)
+print(device)
 
 
 class RolloutBuffer:
@@ -53,7 +61,7 @@ class RolloutBuffer:
 
 def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
     if os.path.exists(path):
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path)
         policy.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         print("✅ Loaded checkpoint from", path)
@@ -120,6 +128,50 @@ def compute_entropy(states, agent):
         entropies.append(placement_entropy + edge_entropy + army_entropy)
     return torch.stack(entropies)
 
+def compute_log_probs(attacks, attack_logits, army_logits, placements, placement_logits, action_edges):
+    """
+    attacks: List of (src, tgt, armies)
+    placements: Index or list of indices where armies were placed
+    attack_logits: [num_edges]
+    army_logits: [num_edges, max_army_send]
+    placement_logits: [num_nodes]
+    action_edges: [num_edges, 2]
+    """
+    # --- Placement log-prob ---
+    placement_log_probs = f.log_softmax(placement_logits, dim=-1)
+
+    if isinstance(placements, (list, tuple)):
+        placement_log_prob = torch.stack([
+            placement_log_probs[p] for p in placements
+        ]).sum()
+    else:
+        placement_log_prob = placement_log_probs[placements]
+
+    # --- Attack log-probs ---
+    if not attacks:
+        attack_log_prob = torch.tensor(0.0, device=attack_logits.device)
+    else:
+        edge_log_probs = F.log_softmax(attack_logits, dim=0)
+        attack_log_prob = 0.0
+
+        for src, tgt, armies in attacks:
+            # Find index of this edge in action_edges
+            match = ((action_edges[:, 0] == src) & (action_edges[:, 1] == tgt)).nonzero(as_tuple=False)
+
+            if len(match) == 0:
+                raise ValueError(f"Attack from {src} to {tgt} not in action_edges.")
+
+            edge_idx = match.item()
+            edge_lp = edge_log_probs[edge_idx]
+            army_log_probs = F.log_softmax(army_logits[edge_idx], dim=0)
+
+            if armies >= len(army_log_probs):
+                raise ValueError(f"Army value {armies} exceeds army_logits range.")
+
+            army_lp = army_log_probs[armies]
+            attack_log_prob += edge_lp + army_lp
+
+    return placement_log_prob + attack_log_prob
 
 class PPOAgent:
     def __init__(
@@ -156,12 +208,12 @@ class PPOAgent:
             placement_logits, attack_logits, army_logits = agent.run_model(
                 game=buffer.states[0]
             )
-            log_probs = agent.compute_action_log_prob(
-                buffer.actions,
+            log_probs = compute_log_probs(
+                buffer.actions[0],
                 attack_logits,
                 army_logits,
                 placement_logits,
-                buffer.edges,
+                buffer.edges[0],
             )
             diff = log_probs - old_log_probs
             if type(diff) == torch.Tensor:
@@ -184,15 +236,21 @@ class PPOAgent:
 
             self.optimizer.zero_grad()
             loss.backward()
+            print("Loss:", loss.item())
+            for name, param in self.policy.named_parameters():
+                if param.grad is not None:
+                    print(f"{name} grad norm:", param.grad.norm().item())
+
             self.optimizer.step()
 
-            if os.path.exists("res/model/"):
+            if os.path.exists("res/model/") and buffer.dones[0]:
+                ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 torch.save(
                     {
                         "model_state_dict": self.policy.state_dict(),
                         "optimizer_state_dict": self.optimizer.state_dict(),
                     },
-                    "res/model/checkpoint.pt",
+                    f"res/model/checkpoint_{ts}.pt",
                 )
 
 
@@ -344,12 +402,13 @@ class RLGNNAgent(AgentBase):
 
     @override
     def init_turn(self, game: Game):
-        if game.round % 50 == 1:
+        if game.round < 3:
             logging.info(f"turn {game.round} started")
             for p in range(1, game.config.num_players + 1):
                 logging.info(
                     f"player {p} owns {len(game.regions_owned_by(p))} regions and {game.number_of_armies_owned(p)} armies"
                 )
+
         new_regions = len(game.regions_owned_by(self.agent_number))
         self.lost_regions = self.current_regions - new_regions
         self.current_regions = new_regions
@@ -456,7 +515,7 @@ class RLGNNAgent(AgentBase):
             used_armies[src.item()] += int(k)
 
             selected_attacks.append(
-                AttackTransfer(game.world.regions[src], game.world.regions[tgt], k)
+                AttackTransfer(game.world.regions[src], game.world.regions[tgt], k, None)
             )
         logging.debug(f"doing {len(selected_attacks)} moves")
         self.moves_this_turn += selected_attacks
@@ -520,7 +579,7 @@ class RLGNNAgent(AgentBase):
         log_probs = []
         for placement in self.get_placements(actions):
             p = placement.region.get_id()
-            placement_log_prob = torch.log_softmax(placement_logits, dim=0)[p]
+            placement_log_prob = torch.log_softmax(placement_logits, dim=-1)[p]
             log_probs.append(placement_log_prob)
 
         for i, attack in enumerate(self.get_attacks(actions)):
@@ -529,27 +588,28 @@ class RLGNNAgent(AgentBase):
             action_edge = action_edges[i]
             src_ix = (
                 (action_edge == torch.tensor([src, tgt]))
-                .all(dim=0)
+                .all()
                 .nonzero(as_tuple=True)[0]
             )
 
             armies = attack.get_armies()
-            attack_log_prob = torch.log_softmax(attack_logits, dim=0)[src_ix]
+            attack_log_prob = torch.log_softmax(attack_logits, dim=-1)[src_ix]
             try:
-                army_log_prob = torch.log_softmax(army_logits[src_ix], dim=1)[
+                army_log_prob = torch.log_softmax(army_logits[src_ix], dim=-1)[
                     :, armies - 1
                 ]
             except IndexError as ie:
                 print(src_ix, armies)
-                print(torch.log_softmax(army_logits[src_ix], dim=1))
+                print(torch.log_softmax(army_logits[src_ix], dim=-1))
                 raise ie
             log_probs.append(army_log_prob)
             log_probs.append(attack_log_prob)
-        ret = sum(log_probs)
+        ret = log_probs
         return ret
 
     def compute_rewards(self, game: Game) -> float:
         ret = self.lost_regions * -0.04
+        ret -= game.round * -.001
         for a in self.get_attacks():
             if a.result is not None:
                 if a.result.winner == FightSide.ATTACKER:
@@ -569,9 +629,9 @@ class RLGNNAgent(AgentBase):
     def get_attacks(self, actions=None):
         if actions is None:
             actions = self.moves_this_turn
-        return [a for a in actions if isinstance(a, AttackTransfer)]
+        return [(a.from_region, a.to_region, a.armies) for a in actions if isinstance(a, AttackTransfer)]
 
     def get_placements(self, actions=None):
         if actions is None:
             actions = self.moves_this_turn
-        return [p for p in actions if isinstance(p, PlaceArmies)]
+        return [p. for p in actions if isinstance(p, PlaceArmies)]

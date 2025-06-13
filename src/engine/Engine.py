@@ -27,10 +27,16 @@ class Engine:
 
     def __init__(self, config: Config):
         self.config: Config = config
-        self.World = World()
+        self.World = World(config.game_config.map_name)
         self.game: Game = Game(config.game_config, self.World)
         logging.getLogger().setLevel(logging.INFO)
         # self.agents: list[AgentBase] = []
+        players = self.config.num_players()
+        self.agents = [AgentBase()] * (players + 1)
+        for p in range(1, players):
+            print(f"setting up agent {p}")
+            self.agents[p] = self.setup_agent(self.config.agent_init(p), p)
+            self.agents[p].init(timeout_millis=self.config.timeout_millis)
 
     def timeout(self, agent: AgentBase, elapsed: int):
         if (
@@ -57,14 +63,8 @@ class Engine:
 
     def run(self, verbose: bool = False) -> GameResult:
         print("running new game")
-        self.game = Game(self.config.game_config)
+        self.game = Game(self.config.game_config, self.World)
         players = self.config.num_players()
-        agents = [AgentBase()] * (players + 1)
-        for p in range(1, players):
-            print(f"setting up agent {p}")
-            agents[p] = self.setup_agent(self.config.agent_init(p), p)
-            agents[p].init(timeout_millis=self.config.timeout_millis)
-
         total_moves = [0] * (players + 1)
         total_time = [0.0] * (players + 1)
         _round = -1
@@ -77,7 +77,7 @@ class Engine:
             logging.debug(
                 f"player {player} still owns {len(self.game.regions_owned_by(player))} regions"
             )
-            agent = agents[player]
+            agent = self.agents[player]
             start = time()
             move = agent.get_move(self.game)
             elapsed = time() - start
@@ -105,5 +105,5 @@ class Engine:
         if verbose:
             debug("\r")
         for p in range(1, players + 1):
-            agents[p].terminate(self.game)
+            self.agents[p].terminate(self.game)
         return GameResult(self.config, self.game, total_moves, total_time)

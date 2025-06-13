@@ -2,24 +2,24 @@ import logging
 
 from line_profiler_pycharm import profile
 import os
-from svgelements import (
-    SVG,
-    Group,
-    Desc,
-    Path,
-    Move,
-    Line,
-    QuadraticBezier,
-    CubicBezier,
-    Close,
-    Point,
-    SVGElement,
-    Text,
-)
-from svgpathtools import svg2paths2
+# from svgelements import (
+#     SVG,
+#     Group,
+#     Desc,
+#     Path,
+#     Move,
+#     Line,
+#     QuadraticBezier,
+#     CubicBezier,
+#     Close,
+#     Point,
+#     SVGElement,
+#     Text,
+# )
+# from svgpathtools import svg2paths2
 from src.game.Continent import Continent
 from src.game.Region import Region
-from src.utils.Util import to_global, is_point_in_path
+# from src.utils.Util import to_global, is_point_in_path
 
 
 def do_bounding_boxes_intersect(bbox1, bbox2):
@@ -34,25 +34,26 @@ def do_bounding_boxes_intersect(bbox1, bbox2):
     )
 
 
-def get_child_by_name(e: SVG, name: str) -> Group:
-    for child in e:
-
-        if child.id == name:
-            return child
-    raise Exception(f"Could not find child with name: {name}")
-
+# def get_child_by_name(e: SVG, name: str) -> Group:
+#     for child in e:
+#
+#         if child.id == name:
+#             return child
+#     raise Exception(f"Could not find child with name: {name}")
+#
 
 class World:
 
-    def __init__(self):
+    def __init__(self, map_name):
         self.continents: list[Continent] = []
         self.regions: list[Region] = []
         self.torch_edge_list: list[list[int]] = []
-        self.diagram: SVG = SVG()
-        if os.path.isfile("world.txt"):
+        # self.diagram: SVG = SVG()
+        map_file = f"{map_name}.txt"
+        if os.path.isfile(map_file):
             continent_map = dict()
             region_map = dict()
-            infile = open("world.txt", "r")
+            infile = open(map_file, "r")
             read_continents = True
             read_regions = False
             read_edges = False
@@ -102,73 +103,73 @@ class World:
             self.read_svg()
         logging.debug("read world file.")
 
-    def read_svg(self):
-        world_path = "res\\maps\\earth.svg"
-        paths, attributes, svg_attributes = svg2paths2(world_path)
-        # print(svg_attributes)
-        f_name = world_path
-
-        self.diagram = SVG.parse(f_name)
-
-        _map = get_child_by_name(self.diagram, "map")
-        _map_desc = self.create_regions(_map)
-        out_file = open("world.txt", "a")
-        for c in self.continents:
-            out_file.write(f"{c.id};{c.name};{c.get_reward()} \n")
-        out_file.write("\n")
-        for r in self.regions:
-            out_file.write(f"{r.id};{r.name};{r.continent.id} \n")
-        out_file.write("\n")
-        out_file.close()
-        self.find_neighbors()
-
-        if _map_desc is not None:
-            for line in _map_desc.splitlines():
-                line = line.strip()
-                i = line.index(" ")
-                keyword = line[0:i]
-                line = line[i + 1 :]
-                if keyword == "adj":
-                    i = line.index(":")
-                    if i == -1:
-                        raise ValueError(f"expected : in {line}")
-                    name1 = line[:i].strip()
-                    r = self.get_region(name1)
-                    name2 = line[i + 1 :].strip()
-                    s = self.get_region(name2)
-                    r.add_neighbour(s)
-                    self.regions.append(r)
-
-        self.find_labels()
-        # self.find_rewards()
-
-    def create_regions(self, _map: Group):
-        map_desc = None
-        for e in _map:
-            if type(e) == Desc:
-                map_desc = e.desc
-            else:
-                c = Continent(name=e.id, id=len(self.continents))
-                self.continents.append(c)
-
-                for child in e:
-                    if type(child) == Path:
-                        p = child
-                        # r = Region(p, p.values['title'], len(self.regions), c)
-                        r = Region(p.values["title"], len(self.regions), c)
-
-                        self.regions.append(r)
-                        c.add_region(r)
-                    elif type(child) == Desc:
-                        s: str = child.desc
-                        w = s.split(" ")
-                        if w[0].strip() == "bonus":
-                            c.set_reward(int(w[1]))
-                        else:
-                            raise ValueError("unknown keyword in continent description")
-        return map_desc
-
-    # def get_name(self, e: et.Element):
+    # def read_svg(self):
+    #     world_path = "res\\maps\\earth.svg"
+    #     paths, attributes, svg_attributes = svg2paths2(world_path)
+    #     # print(svg_attributes)
+    #     f_name = world_path
+    #
+    #     self.diagram = SVG.parse(f_name)
+    #
+    #     _map = get_child_by_name(self.diagram, "map")
+    #     _map_desc = self.create_regions(_map)
+    #     out_file = open("world.txt", "a")
+    #     for c in self.continents:
+    #         out_file.write(f"{c.id};{c.name};{c.get_reward()} \n")
+    #     out_file.write("\n")
+    #     for r in self.regions:
+    #         out_file.write(f"{r.id};{r.name};{r.continent.id} \n")
+    #     out_file.write("\n")
+    #     out_file.close()
+    #     self.find_neighbors()
+    #
+    #     if _map_desc is not None:
+    #         for line in _map_desc.splitlines():
+    #             line = line.strip()
+    #             i = line.index(" ")
+    #             keyword = line[0:i]
+    #             line = line[i + 1 :]
+    #             if keyword == "adj":
+    #                 i = line.index(":")
+    #                 if i == -1:
+    #                     raise ValueError(f"expected : in {line}")
+    #                 name1 = line[:i].strip()
+    #                 r = self.get_region(name1)
+    #                 name2 = line[i + 1 :].strip()
+    #                 s = self.get_region(name2)
+    #                 r.add_neighbour(s)
+    #                 self.regions.append(r)
+    #
+    #     self.find_labels()
+    #     # self.find_rewards()
+    #
+    # def create_regions(self, _map: Group):
+    #     map_desc = None
+    #     for e in _map:
+    #         if type(e) == Desc:
+    #             map_desc = e.desc
+    #         else:
+    #             c = Continent(name=e.id, id=len(self.continents))
+    #             self.continents.append(c)
+    #
+    #             for child in e:
+    #                 if type(child) == Path:
+    #                     p = child
+    #                     # r = Region(p, p.values['title'], len(self.regions), c)
+    #                     r = Region(p.values["title"], len(self.regions), c)
+    #
+    #                     self.regions.append(r)
+    #                     c.add_region(r)
+    #                 elif type(child) == Desc:
+    #                     s: str = child.desc
+    #                     w = s.split(" ")
+    #                     if w[0].strip() == "bonus":
+    #                         c.set_reward(int(w[1]))
+    #                     else:
+    #                         raise ValueError("unknown keyword in continent description")
+    #     return map_desc
+    #
+    # # def get_name(self, e: et.Element):
 
     def find_neighbors(self):
         dist: int = 3
@@ -239,20 +240,20 @@ class World:
                 return c
         return None
 
-    def find_labels(self):
-        text = get_child_by_name(self.diagram, "text")
-        for e in text:
-            p = Point(float(e.values["x"]), float(e.values["y"]))
-            p = to_global(e, p)
-            for r in self.regions:
-                s = to_global(r.path, p)
-                if is_point_in_path(r.path, s):
-                    r.set_label_position(s)
-                    break
-            try:
-                e.values["display"] = None
-            except BaseException as ex:
-                raise ValueError(ex)
+    # def find_labels(self):
+    #     text = get_child_by_name(self.diagram, "text")
+    #     for e in text:
+    #         p = Point(float(e.values["x"]), float(e.values["y"]))
+    #         p = to_global(e, p)
+    #         for r in self.regions:
+    #             s = to_global(r.path, p)
+    #             if is_point_in_path(r.path, s):
+    #                 r.set_label_position(s)
+    #                 break
+    #         try:
+    #             e.values["display"] = None
+    #         except BaseException as ex:
+    #             raise ValueError(ex)
 
     def find_rewards(self):
         rewards = get_child_by_name(self.diagram, "rewards")
@@ -270,6 +271,6 @@ class World:
         return len(self.continents)
 
 
-if __name__ == "__main__":
-    world = World([], [])
-    world.read_svg()
+# if __name__ == "__main__":
+#     world = World([], [])
+#     world.read_svg()

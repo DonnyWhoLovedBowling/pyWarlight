@@ -59,7 +59,7 @@ class RandomAgent(AgentBase):
             if count > 0:
                 neighbors = r.get_neighbours()
                 to = random.choice(list(neighbors))
-                ret.append(AttackTransfer(r, to, count))
+                ret.append(AttackTransfer(r, to, count, None))
         if game.round % 50 == 1:
             logging.info(
                 f"at round {game.round}, random agent does {len(ret)} attack/transfers"

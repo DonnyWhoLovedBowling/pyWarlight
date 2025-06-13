@@ -1,6 +1,6 @@
 from src.game.move.FigthResult import FightResult
 from src.game.Region import Region
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -8,7 +8,7 @@ class AttackTransfer:
     from_region: Region
     to_region: Region
     armies: int
-    result: FightResult = FightResult()
+    result: FightResult = field(default_factory=None)
 
     def __eq__(self, other):
         return (
