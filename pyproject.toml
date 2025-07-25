@@ -1,0 +1,13 @@
+[project]
+name = "pywarlight"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "black>=25.1.0",
+    "line-profiler-pycharm==1.2.0",
+    "multipledispatch==1.0.0",
+    "statsmodels==0.14.4",
+    "svgelements==1.9.6",
+    "svgpathtools==1.6.1",
+]

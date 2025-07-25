@@ -1,0 +1,61 @@
+2;europe;5
+4;asia;7
+
+0;Southern Europe;2
+1;Northern Europe;2 
+2;Great Britain;2 
+3;Western Europe;2 
+4;Ukraine;2 
+5;Scandinavia;2 
+6;Iceland;2 
+7;Siam;4
+8;India;4 
+9;Middle East;4 
+10;Japan;4 
+11;Mongolia;4 
+12;China;4 
+13;Kazakhstan;4 
+14;Irkutsk;4 
+15;Kamchatka;4 
+16;Yakutsk;4 
+17;Siberia;4 
+18;Ural;4 
+
+0;1 
+0;3 
+0;4 
+0;9
+1;2
+1;3 
+1;4 
+1;5 
+2;3
+2;5
+4;5
+4;9 
+4;13 
+4;18
+5;6
+7;8
+7;12 
+8;9
+8;12
+8;13 
+9;13 
+10;11 
+10;15 
+11;12 
+11;14 
+11;15 
+11;17 
+12;13 
+12;17 
+12;18 
+13;17 
+13;18 
+14;15 
+14;16 
+14;17 
+15;16
+16;17
+17;18 
