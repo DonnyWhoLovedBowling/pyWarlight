@@ -522,7 +522,8 @@ class WarlightPolicyNet(nn.Module):
 class RLGNNAgent(AgentBase):
     in_channels = 8
     hidden_channels = 64
-    model = WarlightPolicyNet(in_channels, hidden_channels)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = WarlightPolicyNet(in_channels, hidden_channels).to(device)
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
     army_logits = torch.tensor([])
@@ -547,6 +548,10 @@ class RLGNNAgent(AgentBase):
     num_succes_attacks_tracker = StatTracker()
     army_per_attack_tracker = StatTracker()
 
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+    
     @override
     def is_rl_bot(self):
         return True
@@ -623,6 +628,8 @@ class RLGNNAgent(AgentBase):
         all_regions = set(range(len(game.world.regions)))
         not_mine = all_regions.difference(set(mine))
         available = game.armies_per_turn(me)
+        if not self.placement_logits.is_leaf:
+            self.placement_logits = self.placement_logits.detach()
         self.placement_logits[list(not_mine)] = float("-inf")
         # self.writer.add_histogram("Histograms/Placement_Logits", self.placement_logits, self.game_number)
 
@@ -875,23 +882,16 @@ class RLGNNAgent(AgentBase):
         my_regions = game.regions_owned_by(self.agent_number)
         passivity_reward = (curr_armies - armies_used - len(my_regions))/(curr_armies+len(my_regions)) * -0.01
         transfer_reward = 0
-        for r in my_regions:
-            has_enemy = False
-            for n in r.get_neighbours():
-                if game.get_owner(n) != self.agent_number:
-                    has_enemy = True
-                    if (r.get_id(), n.get_id()) not in attacks:
-                        if game.get_armies(r) > (game.get_armies(n) + 1):
-                            self.total_rewards['missed opportunities'] += 1.
-                    break
-
-            if not has_enemy and r.get_id() not in set([t[0] for t in transfers]):
-                self.total_rewards['missed transfers'] += 1.
-                transfer_reward -= 0.01
-        reward += passivity_reward
+        for src_id, tgt_id in transfers:
+            src_region = game.world.regions[src_id]
+            tgt_region = game.world.regions[tgt_id]
+            # Proximity before and after transfer
+            prox_before = game.proximity_to_nearest_enemy(src_region)
+            prox_after = game.proximity_to_nearest_enemy(tgt_region)
+            if prox_after is not None and prox_before is not None:
+                transfer_reward += (prox_before - prox_after) * 0.02  # Reward for moving closer to enemy
 
         reward += transfer_reward
-
         placement_rewards = 0
         placements = self.get_placements(as_objects=True)
         good_placements = 0
@@ -904,10 +904,35 @@ class RLGNNAgent(AgentBase):
 
         reward += placement_rewards
 
+        # Overstacking penalty
+        my_regions = game.regions_owned_by(player_id)
+        overstack_penalty = 0
+        for region in my_regions:
+            # If all neighbors are owned by the agent, it's a "safe" region
+            if all(game.get_owner(n) == self.agent_number for n in region.get_neighbours()):
+                overstack_penalty -= 0.01 * game.get_armies(region)  # Tune this factor as needed
+
+        reward += overstack_penalty
+        self.total_rewards['overstack_penalty'] += overstack_penalty
+
         if len(attacks) > 0:
             self.total_rewards['turn_with_attack'] += 1
         if len(attacks) > 1:
             self.total_rewards['turn_with_mult_attacks'] += 1
+
+        # Multi-side attack reward
+        attack_targets = defaultdict(set)
+        for a in attacks:
+            attack_targets[a[1]].add(a[0])
+
+        multi_side_attack_reward = 0
+        for tgt, srcs in attack_targets.items():
+            if len(srcs) > 1:
+                # Reward for each region attacked from multiple sources
+                multi_side_attack_reward += 0.05 * (len(srcs) - 1)  # Tune as needed
+
+        reward += multi_side_attack_reward
+
 
         enemy_armies = 0
         my_armies = 0
@@ -916,6 +941,7 @@ class RLGNNAgent(AgentBase):
                 my_armies = game.number_of_armies_owned(p)
             else:
                 enemy_armies += game.number_of_armies_owned(p)
+
 
         self.total_rewards['army_difference'] += my_armies - enemy_armies
         self.total_rewards['num_regions'] += len(my_regions)
@@ -928,6 +954,7 @@ class RLGNNAgent(AgentBase):
         self.total_rewards['placement_reward'] += placement_rewards
         self.total_rewards['transfer_reward'] += transfer_reward
         self.total_rewards['reward'] += reward
+        self.total_rewards['multi_side_attack_reward'] += multi_side_attack_reward
 
         return reward
 
@@ -986,7 +1013,7 @@ class RLGNNAgent(AgentBase):
                 raise ve
 
             if src != tgt:
-                ret.append((src, tgt))
+                ret.append((src.item(), tgt))
         return ret
 
     def sample_attacks_per_node(self):

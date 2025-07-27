@@ -465,7 +465,7 @@ class \
                 else:
                     allied_armies += self.get_armies(n)
 
-            x_list[-4] = self.is_enemy_border(r)
+            x_list[-4] = self.proximity_to_nearest_enemy(r)
             x_list[-3] = enemy_armies/sum(self.armies)
             x_list[-2] = allied_armies/sum(self.armies)
             x_list[-1] = own_armies
@@ -512,3 +512,29 @@ class \
                 return True
 
         return False
+
+    def proximity_to_nearest_enemy(self, region: Region) -> int | None:
+        """
+        Returns the minimum number of steps from `region` to the nearest enemy region.
+        If no enemy is found, returns None.
+        """
+        from collections import deque
+        player = self.get_owner(region)
+        visited = set()
+        queue = deque()
+        queue.append((region, 0))
+        visited.add(region.get_id())
+
+        while queue:
+            current_region, distance = queue.popleft()
+            # Check if current region is owned by an enemy
+            owner = self.get_owner(current_region)
+            if owner != player and owner != -1:
+                return distance
+            # Add neighbors to queue
+            for neighbor in current_region.get_neighbours():
+                nid = neighbor.get_id()
+                if nid not in visited:
+                    visited.add(nid)
+                    queue.append((neighbor, distance + 1))
+        return None  # No enemy found
