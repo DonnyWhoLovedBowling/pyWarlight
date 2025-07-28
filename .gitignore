@@ -1,0 +1,11 @@
+learning*.txt
+*.pyc
+*.csv
+*.pkl
+*.log
+*.json
+*.db
+*.sqlite
+*.db-journal
+*.pt
+*/logs/*
