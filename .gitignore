@@ -7,3 +7,5 @@ learning*.txt
 *.db
 *.sqlite
 *.db-journal
+*.pt
+*/logs/*

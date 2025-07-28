@@ -537,4 +537,4 @@ class \
                 if nid not in visited:
                     visited.add(nid)
                     queue.append((neighbor, distance + 1))
-        return None  # No enemy found
+        return 0  # No enemy found

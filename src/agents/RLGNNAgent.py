@@ -367,8 +367,8 @@ class PPOAgent:
             else:
                 self.army_entropy_tracker.log(army_entropy)
 
-            self.act_loss_tracker.log(value_loss.item())
-            self.crit_loss_tracker.log(policy_loss.item())
+            self.act_loss_tracker.log(policy_loss.item())
+            self.crit_loss_tracker.log(value_loss.item())
 
             entropy_factor = 0.1 - (buffer.states[0].round / buffer.states[0].config.num_games) * 0.08
             loss = policy_loss + 0.5 * value_loss - entropy_factor * entropy
@@ -541,7 +541,7 @@ class RLGNNAgent(AgentBase):
     total_rewards = defaultdict(float)
     prev_state: Game = None
     learning_stats_file: TextIOWrapper = open(f"learning_stats_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt", "a")
-    writer = SummaryWriter(log_dir="../analysis/logs/Atilla_World_extra_aggressive_better_balanced_from_scratch")  # Store data here
+    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_extra_aggressive_better_balanced_from_scratch")  # Store data here
 
     game_number = 1
     num_attack_tracker = StatTracker()
@@ -651,7 +651,31 @@ class RLGNNAgent(AgentBase):
         self.moves_this_turn += ret
         if len(ret) == 0:
             logging.warning("no placements")
+        # After placements are determined
+        placement_tensor = torch.zeros(len(game.world.regions))
+        placement_per_n_neigbors_tensor = torch.zeros(10)
+        placements_next_to_enemy = 0
+        total_placements = 0
+        for ix, p in enumerate(placement.tolist()):
+            placement_tensor[ix] = p
+            n_neighbors = len(game.world.regions[ix].get_neighbours())
+            if n_neighbors < len(placement_per_n_neigbors_tensor):
+                placement_per_n_neigbors_tensor[n_neighbors] += p
+            if p > 0:
+                total_placements += p
+            # Check if region has an enemy neighbor
+            region = game.world.regions[ix]
+            if any(game.get_owner(n) != self.agent_number for n in region.get_neighbours()):
+                placements_next_to_enemy += p
+        self.writer.add_histogram("Placements/region", placement_tensor, self.game_number)
+        self.writer.add_histogram("Placements/n_neighbours", placement_per_n_neigbors_tensor, self.game_number)
+
+        # Add percentage of placements next to enemies to total_rewards
+        if total_placements > 0:
+            self.total_rewards['placement_next_to_enemy_pct'] += placements_next_to_enemy / total_placements
+
         return ret
+        self.writer.add_histogram("Placements/region", placement_tensor, self.game_number)
 
     def attack_transfer(self, game: Game) -> list[AttackTransfer]:
         per_node = True
@@ -890,7 +914,7 @@ class RLGNNAgent(AgentBase):
             prox_after = game.proximity_to_nearest_enemy(tgt_region)
             if prox_after is not None and prox_before is not None:
                 transfer_reward += (prox_before - prox_after) * 0.02  # Reward for moving closer to enemy
-
+        reward += passivity_reward
         reward += transfer_reward
         placement_rewards = 0
         placements = self.get_placements(as_objects=True)
@@ -906,14 +930,16 @@ class RLGNNAgent(AgentBase):
 
         # Overstacking penalty
         my_regions = game.regions_owned_by(player_id)
-        overstack_penalty = 0
+        overstack_reward = 0
         for region in my_regions:
             # If all neighbors are owned by the agent, it's a "safe" region
             if all(game.get_owner(n) == self.agent_number for n in region.get_neighbours()):
-                overstack_penalty -= 0.01 * game.get_armies(region)  # Tune this factor as needed
+                overstack_reward -= 0.000001 * (game.get_armies(region) - 1)  # Tune this factor as needed
 
-        reward += overstack_penalty
-        self.total_rewards['overstack_penalty'] += overstack_penalty
+        # Scale down the overstack penalty to match other reward magnitudes
+
+        reward += overstack_reward
+        self.total_rewards['overstack_reward'] += overstack_reward
 
         if len(attacks) > 0:
             self.total_rewards['turn_with_attack'] += 1
