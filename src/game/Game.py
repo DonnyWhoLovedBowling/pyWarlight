@@ -515,6 +515,7 @@ class \
         self.place_armies_features = []
         self.attack_transfer_features = []
         self.proximity_map = {}
+        self.next_turn()
 
     def get_bonus_armies(self, player):
         armies = 0
