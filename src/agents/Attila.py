@@ -34,6 +34,9 @@ class Attila(AgentBase):
         available = game.armies_per_turn(me)
         
         mine = game.regions_owned_by(me)
+        if len(mine) == 0:
+            logging.error("no regions owned by me, cannot place armies")
+            return []
         c = mine[0].get_continent()
         for r in mine:
             c1 = r.get_continent()

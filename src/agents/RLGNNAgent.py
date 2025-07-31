@@ -1,3 +1,4 @@
+from cmath import phase
 import json
 import logging
 import random
@@ -138,9 +139,9 @@ def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
         checkpoint = torch.load(path)
         policy.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        print("✅ Loaded checkpoint from", path)
+        print("Loaded checkpoint from", path)
     else:
-        print("ℹ️ No checkpoint found, starting fresh.")
+        print("No checkpoint found, starting fresh.")
 
 
 def compute_gae(rewards, values, last_value, dones, gamma=0.95, lam=0.95):
@@ -282,8 +283,8 @@ class PPOAgent:
         self.value_tracker = StatTracker()
         self.value_pred_tracker = StatTracker()
         self.returns_tracker = StatTracker()
-
-        load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint.pt")
+        if 1==0:
+            load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint.pt")
 
     def update(self, buffer: RolloutBuffer, last_value, agent):
         self.reward_normalizer.update(buffer.rewards)
@@ -314,10 +315,10 @@ class PPOAgent:
             return
         for _ in range(self.ppo_epochs):
             placement_logits, _attack_logits, _army_logits = agent.run_model(
-                game=agent.starting_state, action_edges=agent.init_action_edges
+                game=agent.starting_state, action_edges=agent.init_action_edges, action=Phase.PLACE_ARMIES
             )
             _placement_logits, attack_logits, army_logits = agent.run_model(
-                game=agent.post_placement_state, action_edges=agent.post_placement_edges
+                game=agent.post_placement_state, action_edges=agent.post_placement_edges, action=Phase.ATTACK_TRANSFER
             )
 
             log_probs = compute_log_probs(
@@ -488,7 +489,7 @@ class WarlightPolicyNet(nn.Module):
         value = self.value_head(graph_embedding)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, army_counts, action='both'):
+    def forward(self, x, action_edges, army_counts, action=None):
         """
         x: [num_nodes, node_feat_dim]       # node features
         edge_index: [2, num_edges]          # graph structure
@@ -503,13 +504,13 @@ class WarlightPolicyNet(nn.Module):
         attack_logits = torch.Tensor([])
         army_logits = torch.Tensor([])
 
-        if action in ['placement', 'both']:
+        if action == Phase.PLACE_ARMIES or action is None:
             # Placement
             placement_logits = self.placement_head(node_embeddings).squeeze(
                 -1
             )  # [num_nodes]
 
-        if action in ['attack', 'both']:
+        if action == Phase.ATTACK_TRANSFER or action is None:
             # Attack
             attack_logits, army_logits = self.attack_head(
                 node_embeddings, action_edges, army_counts
@@ -562,21 +563,15 @@ class RLGNNAgent(AgentBase):
         faulthandler.enable()
         self.learning_stats_file.write("clip: 0.2; gamma: 0.99; lam: 0.95; lr: 5e-5; entropy_factor: 0.01\n")
 
-    def run_model(self, game: Game, action_edges: torch.Tensor = None, action: str = 'both'):
+    def run_model(self, game: Game, action_edges: torch.Tensor = None, action: str = None):
         node_features = game.create_node_features()
         army_counts = torch.tensor(
             [node[-1] for node in node_features], dtype=torch.float
         )
         graph = torch.tensor(node_features, dtype=torch.float)
-
-        if game.phase == Phase.PLACE_ARMIES:
-            action = 'placement'
-        elif game.phase == Phase.ATTACK_TRANSFER:
-            action = 'attack'
-        else:
-            logging.warning("still using action \"both\"")
-            action = 'both'
-
+        if action is None:
+            action = game.phase
+            
         if len(action_edges) == 0:
             logging.debug("no regions owned")
             return torch.Tensor(0), torch.Tensor(0), torch.Tensor(0)
@@ -615,8 +610,7 @@ class RLGNNAgent(AgentBase):
         self.init_turn(game)
         with torch.no_grad():
             placement_logits, attack_logits, army_logits = self.run_model(game=game,
-                                                                          action_edges=self.init_action_edges,
-                                                                          action='placement')
+                                                                          action_edges=self.init_action_edges)
         self.placement_logits = placement_logits
 
         if len(self.init_action_edges) == 0:
