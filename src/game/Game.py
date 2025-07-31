@@ -243,6 +243,7 @@ class \
                 self.set_as_starting(r, p)
         self.round = 1
         self.phase = Phase.PLACE_ARMIES
+        self.next_turn()
 
     def next_turn(self):
         while True:
@@ -434,7 +435,6 @@ class \
                 _move.result = self.do_attack(_move, most_likely)
                 if self.is_done():
                     return
-        self.next_turn()
         self.phase = Phase.END_MOVE
 
     @dispatch(Move, bool)

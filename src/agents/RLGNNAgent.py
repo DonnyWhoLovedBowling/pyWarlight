@@ -87,8 +87,9 @@ class RewardNormalizer:
         self.var = 1.0
         self.count = 1e-8
 
-    def update(self, rewards):
-        batch = torch.tensor(rewards, dtype=torch.float32)
+    def update(self, rewards: torch.Tensor):
+
+        batch = torch.tensor(rewards, dtype=torch.float32, device=rewards.device)
         batch_mean = batch.mean().item()
         batch_var = batch.var(unbiased=False).item()
         batch_count = len(batch)
@@ -158,8 +159,14 @@ def compute_gae(rewards, values, last_value, dones, gamma=0.95, lam=0.95):
 
 def compute_entropy(placement_logits, edge_logits, army_logits):
     if type(placement_logits) == int:
-        return torch.Tensor(0), torch.Tensor(0), torch.Tensor(0)
-    placement_probs = f.softmax(placement_logits, dim=-1)
+        return torch.tensor(0, dtype=torch.float), torch.tensor(0, dtype=torch.float), torch.tensor(0,  dtype=torch.float)
+    try:
+        placement_probs = f.softmax(placement_logits, dim=-1)
+    except RuntimeError as re:
+        logging.error(re)
+        raise re
+
+
     placement_entropy = -(
             placement_probs * f.log_softmax(placement_logits, dim=-1)
     ).sum()
@@ -186,7 +193,7 @@ def compute_log_probs(attacks, attack_logits, army_logits, placements, placement
     """
     # --- Placement log-prob ---
     if type(placements) == int or len(action_edges) == 0:
-        return torch.tensor([0], dtype=torch.float)
+        return torch.tensor([0], dtype=torch.float, device=attack_logits.device)
     try:
         placement_log_probs = f.log_softmax(placement_logits, dim=-1)
     except AttributeError as ae:
@@ -287,11 +294,12 @@ class PPOAgent:
             load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint.pt")
 
     def update(self, buffer: RolloutBuffer, last_value, agent):
-        self.reward_normalizer.update(buffer.rewards)
-        normalized_rewards = self.reward_normalizer.normalize(buffer.rewards).tolist()
+        rewards_tensor = torch.tensor(buffer.rewards)
+        self.reward_normalizer.update(rewards_tensor)
+        normalized_rewards_tensor = self.reward_normalizer.normalize(rewards_tensor)
 
         advantages, returns = compute_gae(
-            normalized_rewards,
+            normalized_rewards_tensor,
             buffer.values,
             last_value,
             buffer.dones,
@@ -300,7 +308,7 @@ class PPOAgent:
         )
         self.value_tracker.log(buffer.values[0].item())
         agent: RLGNNAgent = agent
-        agent.total_rewards['normalized_reward'] = normalized_rewards[0]
+        agent.total_rewards['normalized_reward'] = normalized_rewards_tensor.tolist()[0]
 
         self.adv_tracker.log(advantages[0].item())
         if agent.game_number > 1:
@@ -333,7 +341,7 @@ class PPOAgent:
             if type(diff) == torch.Tensor:
                 ratio = diff.exp()
             else:
-                ratio = torch.Tensor(diff).exp()
+                ratio = torch.tensor(diff, device=log_probs.device).exp()
 
             agent.total_rewards['ppo_ratio'] = ratio.item()
 
@@ -350,7 +358,7 @@ class PPOAgent:
             placement_entropy, edge_entropy, army_entropy = compute_entropy(placement_logits, attack_logits,
                                                                             army_logits)
             lst = []
-            lst.append(placement_entropy + edge_entropy + army_entropy)
+            lst.append(0.01*placement_entropy + edge_entropy + army_entropy)
             entropy = torch.stack(lst)
             entropy = entropy.mean()
             if isinstance(placement_entropy, torch.Tensor):
@@ -371,7 +379,7 @@ class PPOAgent:
             self.act_loss_tracker.log(policy_loss.item())
             self.crit_loss_tracker.log(value_loss.item())
 
-            entropy_factor = 0.1 - (buffer.states[0].round / buffer.states[0].config.num_games) * 0.08
+            entropy_factor = 0.02 - (buffer.states[0].round / buffer.states[0].config.num_games) * 0.01
             loss = policy_loss + 0.5 * value_loss - entropy_factor * entropy
             self.loss_tracker.log(loss.item())
 
@@ -478,7 +486,7 @@ class WarlightPolicyNet(nn.Module):
 
     def get_value(self, game: Game):
         node_features = game.create_node_features()
-        graph = torch.tensor(node_features, dtype=torch.float)
+        graph = torch.tensor(node_features, dtype=torch.float, device=self.edge_tensor.device)
         edge_tensor = self.edge_tensor
 
         x = f.relu(self.gnn1(graph, edge_tensor))
@@ -500,9 +508,9 @@ class WarlightPolicyNet(nn.Module):
         edge_index = self.edge_tensor
         x = f.relu(self.gnn1(x, edge_index))
         node_embeddings = self.gnn2(x, edge_index)
-        placement_logits = torch.Tensor([])
-        attack_logits = torch.Tensor([])
-        army_logits = torch.Tensor([])
+        placement_logits = torch.tensor([])
+        attack_logits = torch.tensor([])
+        army_logits = torch.tensor([])
 
         if action == Phase.PLACE_ARMIES or action is None:
             # Placement
@@ -516,14 +524,14 @@ class WarlightPolicyNet(nn.Module):
                 node_embeddings, action_edges, army_counts
             )
 
-        return placement_logits, attack_logits, army_logits
+        return placement_logits.to('cpu'), attack_logits.to('cpu'), army_logits.to('cpu')
 
 
 @dataclass
 class RLGNNAgent(AgentBase):
     in_channels = 8
     hidden_channels = 64
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
     model = WarlightPolicyNet(in_channels, hidden_channels).to(device)
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
@@ -542,7 +550,7 @@ class RLGNNAgent(AgentBase):
     total_rewards = defaultdict(float)
     prev_state: Game = None
     learning_stats_file: TextIOWrapper = open(f"learning_stats_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt", "a")
-    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_extra_aggressive_better_balanced_from_scratch")  # Store data here
+    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_balanced_entropy")  # Store data here
 
     game_number = 1
     num_attack_tracker = StatTracker()
@@ -566,20 +574,21 @@ class RLGNNAgent(AgentBase):
     def run_model(self, game: Game, action_edges: torch.Tensor = None, action: str = None):
         node_features = game.create_node_features()
         army_counts = torch.tensor(
-            [node[-1] for node in node_features], dtype=torch.float
+            [node[-1] for node in node_features], dtype=torch.float, device=self.device
         )
-        graph = torch.tensor(node_features, dtype=torch.float)
+        graph = torch.tensor(node_features, dtype=torch.float, device=self.device)
         if action is None:
             action = game.phase
             
         if len(action_edges) == 0:
             logging.debug("no regions owned")
-            return torch.Tensor(0), torch.Tensor(0), torch.Tensor(0)
+            return torch.tensor(0), torch.tensor(0), torch.tensor(0)
         else:
             return self.model(graph, action_edges, army_counts, action)
 
     @override
     def init_turn(self, game: Game):
+        # logging.info(f"round {game.round}")
         if self.model.edge_tensor is None:
             self.model.edge_tensor = torch.tensor(game.world.torch_edge_list, dtype=torch.long)
         if game.round < 3 or game.round % 20 == 0:
@@ -591,7 +600,8 @@ class RLGNNAgent(AgentBase):
                         [f"{r}: {game.get_armies(r)}" for r in regions]) + ')'
                 )
         self.init_action_edges = deepcopy(torch.tensor(game.create_action_edges(), dtype=torch.long))
-
+        if len(self.init_action_edges) == 0:
+            logging.debug("no action edges owned")
         self.moves_this_turn = []
         self.starting_state = deepcopy(game)
         # with torch.no_grad():
@@ -669,12 +679,11 @@ class RLGNNAgent(AgentBase):
             self.total_rewards['placement_next_to_enemy_pct'] += placements_next_to_enemy / total_placements
 
         return ret
-        self.writer.add_histogram("Placements/region", placement_tensor, self.game_number)
 
     def attack_transfer(self, game: Game) -> list[AttackTransfer]:
         per_node = True
         self.post_placement_state = deepcopy(game)
-        self.post_placement_edges = torch.tensor(game.create_action_edges(), dtype=torch.long)
+        self.post_placement_edges = torch.tensor(game.create_action_edges(), dtype=torch.long, device=self.device)
         with torch.no_grad():
             placement_logits, attack_logits, army_logits = self.run_model(game=game,
                                                                           action_edges=self.post_placement_edges)
@@ -692,8 +701,8 @@ class RLGNNAgent(AgentBase):
         logging.debug("RLGNNAgent terminated")
         self.end_move(game)
         self.buffer.clear()
-        self.init_action_edges = torch.Tensor([])
-        self.post_placement_edges = torch.Tensor([])
+        self.init_action_edges = torch.tensor([])
+        self.post_placement_edges = torch.tensor([])
 
         self.writer.add_scalar('win', game.winning_player() == self.agent_number, self.game_number)
         self.writer.add_scalar('loss_mean', self.ppo_agent.loss_tracker.mean(), self.game_number)
