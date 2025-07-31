@@ -1,7 +1,9 @@
 import logging
 import math
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
+from collections import deque
+import re
 
 from src.engine.AgentBase import AgentBase
 from src.game.Continent import Continent
@@ -35,16 +37,18 @@ class \
     config: GameConfig
     world: World
     armies: list[int] = field(default_factory=lambda: [])
-    owner: list[int] = field(default_factory=lambda: [])
     round: int = 0
     turn: int = 0
     phase: Phase = field(default_factory=lambda: [])
     score: list[int] = field(default_factory=lambda: [])
     pickable_regions: list[Region] = field(default_factory=lambda: [])
-
+    proximity_map: dict[int] = field(default_factory=dict)
+    place_armies_features: list[list[int]] = field(default_factory=lambda: [])
+    attack_transfer_features: list[list[int]] = field(default_factory=lambda: [])
+    action_edges: list[list[int]] = field(default_factory=lambda: [])   
+    
     def __post_init__(self):
         self.armies = [2] * self.world.num_regions()
-        self.owner = [-1] * self.world.num_regions()
         self.score = [-1] * (self.config.num_players + 1)
         self.turn = 1
         random.seed(datetime.now().timestamp())
@@ -58,11 +62,11 @@ class \
 
     @dispatch(Region)
     def get_owner(self, region: Region):
-        return self.owner[region.get_id()]
+        return region.owner
 
     @dispatch(int)
     def get_owner(self, region: int):
-        return self.owner[region]
+        return self.world.regions[region].owner
 
 
     @dispatch(Continent)
@@ -74,10 +78,16 @@ class \
         return player
 
     def set_owner(self, region: Region, player: int) -> None:
-        old = self.owner[region.get_id()]
-        self.owner[region.get_id()] = player
+        old = region.owner
+        region.owner = player
+        region.is_border = False
+        for n in region.get_neighbours():
+            if n.owner != player:
+                n.is_border = True
+                region.is_border = True
+                
 
-        if old > 0 and self.number_of_regions_owned(old) == 0:
+        if old > 0 and self.number_of_regions_owned(old) == 0 and player != -1:
             _max = self.max_score()
             if self.score[old] != -1:
                 raise ValueError("score should be -1")
@@ -112,7 +122,7 @@ class \
         return n
 
     def is_owned_by(self, region: Region, player: int) -> bool:
-        return self.owner[region.get_id()] == player
+        return region.owner == player
 
     def regions_owned_by(self, player: int) -> list[Region]:
         owned_regions = []
@@ -206,6 +216,9 @@ class \
 
     def init_starting_regions(self):
         self.pickable_regions = []
+        if self.turn == 1:
+            for r in self.world.regions:
+                self.set_owner(r, -1)
         if self.config.warlords:
             for c in self.world.continents:
                 num_regions = len(c.get_regions())
@@ -221,7 +234,7 @@ class \
                         self.pickable_regions.append(region)
                         break
         else:
-            self.pickable_regions = deepcopy(self.world.regions)
+            self.pickable_regions = copy(self.world.regions)
 
         n_starting = self.num_starting_regions()
         for i in range(n_starting):
@@ -445,6 +458,11 @@ class \
             self.attack_transfer([], False)
 
     def create_node_features(self) -> list[list[int]]:
+        if self.phase in [Phase.ATTACK_TRANSFER, Phase.END_MOVE] and len(self.attack_transfer_features) > 0:
+            return self.attack_transfer_features
+        elif self.phase == Phase.PLACE_ARMIES and len(self.place_armies_features) > 0:
+            return self.place_armies_features   
+        
         graph = []
         all_armies = sum(self.armies)
         for r in self.world.regions:
@@ -470,22 +488,33 @@ class \
             x_list[-2] = allied_armies/sum(self.armies)
             x_list[-1] = own_armies
             graph.append(x_list)
+        if self.phase in [Phase.ATTACK_TRANSFER, Phase.END_MOVE]:
+            self.attack_transfer_features = graph
+        elif self.phase == Phase.PLACE_ARMIES:       
+            self.place_armies_features = graph
+        else:
+            raise ValueError(f"Unsupported phase for node features: {self.phase}")   
         return graph
 
     def create_action_edges(self) -> list[list[int]]:
-        action_edges = []
+        if len(self.action_edges) > 0:
+            return self.action_edges
         for src in self.regions_owned_by(self.turn):
             if self.get_armies(src) > 1:
                 for tgt in src.get_neighbours():
-                    action_edges.append([src.get_id(), tgt.get_id()])
-                action_edges.append([src.get_id(), src.get_id()])
-        return action_edges
+                    self.action_edges.append([src.get_id(), tgt.get_id()])
+                self.action_edges.append([src.get_id(), src.get_id()])
+        return self.action_edges
 
     def end_move(self, agent: AgentBase):
         if self.phase != Phase.END_MOVE:
             raise ValueError("not the right moment to end move!")
         agent.end_move(self)
         self.phase = Phase.PLACE_ARMIES
+        self.action_edges = []
+        self.place_armies_features = []
+        self.attack_transfer_features = []
+        self.proximity_map = {}
 
     def get_bonus_armies(self, player):
         armies = 0
@@ -498,27 +527,19 @@ class \
         return self.turn
 
     def is_border(self, r: Region) -> bool:
-        me = self.current_player()
-        for n in r.get_neighbours():
-            if self.get_owner(n) != me:
-                return True
-
-        return False
+        return r.is_border
 
     def is_enemy_border(self, r: Region) -> bool:
-        me = self.current_player()
-        for n in r.get_neighbours():
-            if self.get_owner(n) != me and self.get_owner(n) != 0:
-                return True
-
-        return False
+        return r.is_border and self.get_owner(r) != self.turn
 
     def proximity_to_nearest_enemy(self, region: Region) -> int | None:
         """
         Returns the minimum number of steps from `region` to the nearest enemy region.
         If no enemy is found, returns None.
         """
-        from collections import deque
+        if region.get_id() in self.proximity_map: 
+            return self.proximity_map[region.get_id()]  
+        
         player = self.get_owner(region)
         visited = set()
         queue = deque()
@@ -530,6 +551,7 @@ class \
             # Check if current region is owned by an enemy
             owner = self.get_owner(current_region)
             if owner != player and owner != -1:
+                self.proximity_map[region.get_id()] = distance
                 return distance
             # Add neighbors to queue
             for neighbor in current_region.get_neighbours():
@@ -537,4 +559,5 @@ class \
                 if nid not in visited:
                     visited.add(nid)
                     queue.append((neighbor, distance + 1))
+        self.proximity_map[region.get_id()] = 0
         return 0  # No enemy found

@@ -1,5 +1,5 @@
 import sys
-
+print("Loaded Region.py from", __file__)
 if sys.version_info[1] < 11:
     from typing_extensions import Self
 else:
@@ -17,6 +17,8 @@ class Region:
     name: str
     id: int
     continent: Continent
+    owner: int = -1  # -1 means unowned    
+    is_border = True
     neighbours: list[Self] = None
     label_position: tuple[int, int] = 0, 0
 
