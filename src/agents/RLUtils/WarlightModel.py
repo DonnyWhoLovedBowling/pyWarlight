@@ -97,12 +97,13 @@ class WarlightPolicyNet(nn.Module):
         value = self.value_head(graph_embedding)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, army_counts, action: str=None):
+    def forward(self, x, action_edges, army_counts, action: str=None, edge_mask=None):
         """
         x: [num_nodes, node_feat_dim]       # node features
         edge_index: [2, num_edges]          # graph structure
         action_edges: [num_actions, 2]      # list of (src, tgt) edges for attacks
         army_counts: [num_nodes]            # current army count on each node
+        edge_mask: [num_actions]            # mask for valid edges (True = valid, False = padded)
         """
         # GNN
         edge_index = self.edge_tensor
@@ -123,6 +124,10 @@ class WarlightPolicyNet(nn.Module):
             attack_logits, army_logits = self.attack_head(
                 node_embeddings, action_edges, army_counts
             )
+            
+            # Apply edge mask to attack logits if provided
+            if edge_mask is not None:
+                attack_logits = attack_logits.masked_fill(~edge_mask, -1e9)
+                army_logits = army_logits.masked_fill(~edge_mask.unsqueeze(-1), -1e9)
 
         return placement_logits, attack_logits, army_logits
-
