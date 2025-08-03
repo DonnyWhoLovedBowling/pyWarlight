@@ -32,8 +32,8 @@ class AttackHead(nn.Module):
         )
         self.max_army_send = max_army_send
 
-    def forward(self, node_embeddings, action_edges, army_counts):
-        src, tgt = action_edges[:, 0], action_edges[:, 1]
+    def forward(self, node_embeddings: torch.Tensor, action_edges: torch.Tensor, army_counts: torch.Tensor):
+        src, tgt = action_edges[:, 0].to(node_embeddings.device), action_edges[:, 1].to(node_embeddings.device)
         edge_embed = torch.cat([node_embeddings[src], node_embeddings[tgt]], dim=-1)
 
         edge_logits = self.edge_scorer(edge_embed).squeeze(-1)  # [num_edges]
@@ -124,5 +124,5 @@ class WarlightPolicyNet(nn.Module):
                 node_embeddings, action_edges, army_counts
             )
 
-        return placement_logits.to('cpu'), attack_logits.to('cpu'), army_logits.to('cpu')
+        return placement_logits, attack_logits, army_logits
 

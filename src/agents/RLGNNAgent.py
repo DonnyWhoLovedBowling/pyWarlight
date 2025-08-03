@@ -67,12 +67,16 @@ class RLGNNAgent(AgentBase):
     total_rewards = defaultdict(float)
     prev_state: PrevStateBuffer = None
     learning_stats_file: TextIOWrapper = open(f"learning_stats_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt", "a")
-    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_balanced_v2_entropy")  # Store data here
+    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_balanced_v2_entropy_batched")  # Store data here
 
     game_number = 1
     num_attack_tracker = StatTracker()
     num_succes_attacks_tracker = StatTracker()
     army_per_attack_tracker = StatTracker()
+
+    # histogram distributions
+    placement_regions = []
+    placement_neighbours = []
 
     @property
     def device(self):
@@ -287,17 +291,15 @@ class RLGNNAgent(AgentBase):
         total_placements = 0
         for ix, p in enumerate(placement.tolist()):
             for _ in range(p):
-                placement_tensor.append(torch.tensor(ix-0.5))
+                self.placement_regions.append(torch.tensor(ix-0.5))
                 n_neighbors = len(game.world.regions[ix].get_neighbours())-0.5
-                placement_per_n_neigbors_tensor.append(torch.tensor(n_neighbors))
+                self.placement_neighbours.append(torch.tensor(n_neighbors))
             if p > 0:
                 total_placements += p
             # Check if region has an enemy neighbor
             region = game.world.regions[ix]
             if any(game.get_owner(n) != self.agent_number for n in region.get_neighbours()):
                 placements_next_to_enemy += p
-        self.writer.add_histogram("Placements/region", torch.stack(placement_tensor), self.game_number)
-        self.writer.add_histogram("Placements/n_neighbours", torch.stack(placement_per_n_neigbors_tensor), self.game_number)
         # Add percentage of placements next to enemies to total_rewards
         if total_placements > 0:
             self.total_rewards['placement_next_to_enemy_pct'] += placements_next_to_enemy / total_placements
@@ -369,6 +371,9 @@ class RLGNNAgent(AgentBase):
         self.writer.add_scalar('turn_with_mult_attacks', self.total_rewards['turn_with_mult_attacks'] / game.round, self.game_number)
         self.writer.add_scalar('num_regions', self.total_rewards['num_regions'] / game.round, self.game_number)
         self.writer.add_scalar('army_difference', self.total_rewards['army_difference'] / game.round, self.game_number)
+        self.writer.add_histogram("Placements/region", self.placement_regions, self.game_number)
+        self.writer.add_histogram("Placements/n_neighbours", self.placement_neighbours, self.game_number)
+
         for key, value in self.total_rewards.items():
             if key in ['missed opportunities', 'missed transfers', 'turn_with_attack', 'turn_with_mult_attacks', 'num_regions', 'army_difference']:
                 continue
