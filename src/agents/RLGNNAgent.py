@@ -127,6 +127,7 @@ class RLGNNAgent(AgentBase):
             action_edges: [batch_size, num_edges, 2] (padded to 42 edges)
             action: Phase.PLACE_ARMIES or Phase.ATTACK_TRANSFER
         """
+        device = node_features.device
         batch_size = node_features.size(0)
         num_nodes = node_features.size(1)
 
@@ -134,32 +135,27 @@ class RLGNNAgent(AgentBase):
         attack_logits_list = []
         army_logits_list = []
 
-        # Process each sample in the batch
-        for i in range(batch_size):
-            sample_features = node_features[i]  # [num_nodes, features]
-            sample_edges = action_edges[i]  # [42, 2] (padded)
-
-            # Remove padding from edges (edges with -1 are padding)
-            valid_edge_mask = (sample_edges[:, 0] >= 0) & (sample_edges[:, 1] >= 0)
-            valid_edges = sample_edges[valid_edge_mask]  # [num_valid_edges, 2]
-
-            # Run model on this sample
-            if valid_edges.numel() == 0:
-                logging.debug("no regions owned in batch sample")
-                pl = torch.zeros(num_nodes) if action == Phase.PLACE_ARMIES or action is None else torch.tensor([])
-                al = torch.zeros(0) if action == Phase.ATTACK_TRANSFER or action is None else torch.tensor([])
-                arl = torch.zeros(0, 50) if action == Phase.ATTACK_TRANSFER or action is None else torch.tensor([])
-            else:
-                pl, al, arl = self.model(
-                    sample_features.to(dtype=torch.float, device=self.device),
-                    valid_edges,
-                    sample_features[:, -1].to(dtype=torch.float, device=self.device),
-                    action
-                )
-
-            placement_logits_list.append(pl)
-            attack_logits_list.append(al)
-            army_logits_list.append(arl)
+        # Process entire batch at once
+        batch_size = node_features.size(0)
+        
+        # Remove padding from all samples in batch
+        valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, 42]
+        
+        # For batched processing, you'll need to handle variable edge counts
+        # This depends on how your model handles batched graphs with different edge counts
+        
+        # If your model can handle padded edges directly:
+        placement_logits, attack_logits, army_logits = self.model(
+            node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
+            action_edges,  # [batch_size, 42, 2] (with padding)
+            node_features[:, :, -1].to(dtype=torch.float, device=device),  # [batch_size, num_nodes]
+            action,
+            edge_masks=valid_edge_masks  # Pass mask to model to ignore padded edges
+        )
+        
+        placement_logits_list = [placement_logits[i] for i in range(batch_size)]
+        attack_logits_list = [attack_logits[i] for i in range(batch_size)]
+        army_logits_list = [army_logits[i] for i in range(batch_size)]
 
         # Stack and pad results
         if action == Phase.PLACE_ARMIES or action is None:

@@ -10,4 +10,30 @@ dependencies = [
     "statsmodels==0.14.4",
     "svgelements==1.9.6",
     "svgpathtools==1.6.1",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",  # Optional: for coverage reports
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+pythonpath = ["src"]  # Add this line
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-v",
+]
+
+# Update coverage source
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "**/test_*",
 ]
