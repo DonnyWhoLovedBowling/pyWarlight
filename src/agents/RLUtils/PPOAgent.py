@@ -52,7 +52,6 @@ class PPOAgent:
             gamma=self.gamma,
             lam=self.lam
         )
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.value_tracker.log(buffer.get_values().mean().item())
         agent.total_rewards['normalized_reward'] = normalized_rewards_tensor.mean().item()
 

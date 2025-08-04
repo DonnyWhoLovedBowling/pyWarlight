@@ -1,17 +1,13 @@
-from cmath import phase
-from copy import copy
-import json
 import logging
 import random
 import time
 import sys
-import os
+import math
 
 from collections import defaultdict
 from dataclasses import dataclass
 from io import TextIOWrapper
 
-import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -20,9 +16,9 @@ from src.game.FightSide import FightSide
 from src.game.Phase import Phase
 
 if sys.version_info[1] < 11:
-    from typing_extensions import override
+    from typing_extensions import override, Literal
 else:
-    from typing import override, TextIO
+    from typing import override
 
 import torch
 import torch.nn.functional as f
@@ -67,7 +63,7 @@ class RLGNNAgent(AgentBase):
     total_rewards = defaultdict(float)
     prev_state: PrevStateBuffer = None
     learning_stats_file: TextIOWrapper = open(f"learning_stats_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt", "a")
-    writer = SummaryWriter(log_dir="analysis/logs/Atilla_World_balanced_v2_entropy_batched")  # Store data here
+    writer = SummaryWriter(log_dir="analysis/logs/Julius_World_balanced_v3_entropy_batched_atilla_checkpoint")  # Store data here
 
     game_number = 1
     num_attack_tracker = StatTracker()
@@ -93,7 +89,7 @@ class RLGNNAgent(AgentBase):
         self.learning_stats_file.write("clip: 0.2; gamma: 0.99; lam: 0.95; lr: 5e-5; entropy_factor: 0.01\n")
 
 
-    def run_model(self, node_features: torch.Tensor, action_edges: torch.Tensor = None, action: str = None):
+    def run_model(self, node_features: torch.Tensor, action_edges: torch.Tensor = None, action: Literal[Phase] = None):
         """
         Handle both single samples and batches
 
@@ -112,8 +108,8 @@ class RLGNNAgent(AgentBase):
             army_counts = node_features[:, -1].to(dtype=torch.float, device=self.device)
             graph = node_features.to(dtype=torch.float, device=self.device)
 
-            if len(action_edges) == 0:
-                logging.debug("no regions owned")
+            if action_edges.numel() == 0 and action == Phase.ATTACK_TRANSFER:
+                logging.debug("no actions possible owned")
                 return torch.tensor(0), torch.tensor(0), torch.tensor(0)
             else:
                 return self.model(graph, action_edges, army_counts, action)
@@ -135,27 +131,23 @@ class RLGNNAgent(AgentBase):
         attack_logits_list = []
         army_logits_list = []
 
-        # Process entire batch at once
-        batch_size = node_features.size(0)
-        
+
         # Remove padding from all samples in batch
         valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, 42]
-        
-        # For batched processing, you'll need to handle variable edge counts
-        # This depends on how your model handles batched graphs with different edge counts
-        
-        # If your model can handle padded edges directly:
+        self.model.to(device)
         placement_logits, attack_logits, army_logits = self.model(
             node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
             action_edges,  # [batch_size, 42, 2] (with padding)
             node_features[:, :, -1].to(dtype=torch.float, device=device),  # [batch_size, num_nodes]
             action,
-            edge_masks=valid_edge_masks  # Pass mask to model to ignore padded edges
+            valid_edge_masks
+            # Pass mask to model to ignore padded edges
         )
-        
-        placement_logits_list = [placement_logits[i] for i in range(batch_size)]
-        attack_logits_list = [attack_logits[i] for i in range(batch_size)]
-        army_logits_list = [army_logits[i] for i in range(batch_size)]
+        if action == Phase.PLACE_ARMIES:
+            placement_logits_list = [placement_logits[i] for i in range(batch_size)]
+        else:
+            attack_logits_list = [attack_logits[i] for i in range(batch_size)]
+            army_logits_list = [army_logits[i] for i in range(batch_size)]
 
         # Stack and pad results
         if action == Phase.PLACE_ARMIES or action is None:
@@ -244,23 +236,25 @@ class RLGNNAgent(AgentBase):
     @override
     def place_armies(self, game: Game) -> list[PlaceArmies]:
         self.init_turn(game)
+        me = self.agent_number
+        my_regions = game.regions_owned_by(me)
         with torch.no_grad():
             placement_logits, attack_logits, army_logits = self.run_model(self.starting_node_features,
-                                                                          action_edges=self.action_edges)
+                                                                          action_edges=self.action_edges,
+                                                                          action=Phase.PLACE_ARMIES)
         self.placement_logits = placement_logits
 
-        if len(self.action_edges) == 0:
-            logging.warning("no placements")
+        if len(my_regions) == 0:
+            logging.warning("no regions for placements")
             return []
-        me = game.turn
 
-        mine = [r.get_id() for r in game.regions_owned_by(me)]
+        mine = [r.get_id() for r in my_regions]
         all_regions = set(range(len(game.world.regions)))
         not_mine = all_regions.difference(set(mine))
         available = game.armies_per_turn(me)
         if not self.placement_logits.is_leaf:
             self.placement_logits = self.placement_logits.detach()
-        self.placement_logits[list(not_mine)] = float("-inf")
+        self.placement_logits[list(not_mine)] = float('-inf')  # Mask out regions not owned by the agent
 
         placement_probs = self.placement_logits.softmax(dim=0)
         try:
@@ -308,7 +302,8 @@ class RLGNNAgent(AgentBase):
         self.post_placement_node_features = torch.tensor(game.create_node_features(), dtype=torch.float)
         with torch.no_grad():
             placement_logits, attack_logits, army_logits = self.run_model(self.post_placement_node_features,
-                                                                          action_edges=self.action_edges, action=Phase.ATTACK_TRANSFER)
+                                                                          action_edges=self.action_edges,
+                                                                          action=Phase.ATTACK_TRANSFER)
 
         self.attack_logits, self.army_logits = attack_logits, army_logits
         if per_node:
@@ -367,8 +362,12 @@ class RLGNNAgent(AgentBase):
         self.writer.add_scalar('turn_with_mult_attacks', self.total_rewards['turn_with_mult_attacks'] / game.round, self.game_number)
         self.writer.add_scalar('num_regions', self.total_rewards['num_regions'] / game.round, self.game_number)
         self.writer.add_scalar('army_difference', self.total_rewards['army_difference'] / game.round, self.game_number)
-        self.writer.add_histogram("Placements/region", self.placement_regions, self.game_number)
-        self.writer.add_histogram("Placements/n_neighbours", self.placement_neighbours, self.game_number)
+        self.writer.add_histogram("Placements/region",
+                                  torch.tensor(self.placement_regions, dtype=torch.float16),
+                                  self.game_number)
+        self.writer.add_histogram("Placements/n_neighbours",
+                                  torch.tensor(self.placement_neighbours, dtype=torch.float16),
+                                  self.game_number)
 
         for key, value in self.total_rewards.items():
             if key in ['missed opportunities', 'missed transfers', 'turn_with_attack', 'turn_with_mult_attacks', 'num_regions', 'army_difference']:
@@ -407,15 +406,14 @@ class RLGNNAgent(AgentBase):
 
         if game.round % self.batch_size == 0 or done:
             with torch.no_grad():
-                next_value = self.model.get_value(torch.tensor(self.post_placement_node_features, dtype=torch.float32)) * (1 - done)
+                next_value = self.model.get_value(self.post_placement_node_features) * (1 - done)
             self.ppo_agent.update(self.buffer, next_value, self)
             self.buffer.clear()
-
+            self.model.to('cpu') # Move model to CPU after update to save memory
     def compute_rewards(self, game: Game) -> float:
         prev_state = self.prev_state
         current_state = game
         player_id = self.agent_number
-        turn_number = game.round
         reward, region_reward, continent_reward, army_reward, action_reward = 0, 0, 0, 0, 0
         long_game_reward = 0
         if prev_state is not None:
@@ -484,8 +482,7 @@ class RLGNNAgent(AgentBase):
         reward += action_reward
 
         # 5️⃣ Long-game penalty
-        if turn_number > 300:
-            long_game_reward -= 0.02
+        long_game_reward -= 0.02
         reward += long_game_reward
 
         if game.is_done():
@@ -499,7 +496,10 @@ class RLGNNAgent(AgentBase):
         attack_transfers = set([(a[0], a[1]) for a in self.get_attacks(inc_transfers=True)])
         transfers = attack_transfers.difference(attacks)
         my_regions = game.regions_owned_by(self.agent_number)
-        passivity_reward = (curr_armies - armies_used - len(my_regions))/(curr_armies+len(my_regions)) * -0.01
+        passivity_reward = 0
+        if len(my_regions) > 0:
+            passivity_reward = (curr_armies - armies_used - len(my_regions))/(curr_armies+len(my_regions)) * -0.01
+
         transfer_reward = 0
         for src_id, tgt_id in transfers:
             src_region = game.world.regions[src_id]
@@ -508,23 +508,24 @@ class RLGNNAgent(AgentBase):
             prox_before = game.proximity_to_nearest_enemy(src_region)
             prox_after = game.proximity_to_nearest_enemy(tgt_region)
             if prox_after is not None and prox_before is not None:
-                transfer_reward += (prox_before - prox_after) * 0.005  # Reward for moving closer to enemy
+                transfer_reward += (prox_before - prox_after) *  math.exp(-0.3 * prox_before) * 0.02  # Reward for moving closer to enemy
         reward += passivity_reward
         reward += transfer_reward
         placement_rewards = 0
         placements = self.get_placements(as_objects=True)
         good_placements = 0
-        for p in placements:
-            good_placements += 1 if any(
-                [n for n in p.region.get_neighbours() if game.get_owner(n) != self.agent_number]) else 0
 
-        placement_rewards += ((good_placements * 0.1 - (len(placements) - good_placements) * 0.05) /
-                              len(game.regions_owned_by(player_id)))
+        if len(my_regions) > 0:
+            for p in placements:
+                good_placements += 1 if any(
+                    [n for n in p.region.get_neighbours() if game.get_owner(n) != self.agent_number]) else 0
+
+            placement_rewards += ((good_placements * 0.1 - (len(placements) - good_placements) * 0.05) /
+                                  len(my_regions))
 
         reward += placement_rewards
 
         # Overstacking penalty
-        my_regions = game.regions_owned_by(player_id)
         overstack_reward = 0
         for region in my_regions:
             # If all neighbors are owned by the agent, it's a "safe" region

@@ -4,6 +4,8 @@ from time import time
 
 from src.agents.Attila import Attila
 from src.agents.Napoleon import Napoleon
+from src.agents.Julius import Julius
+
 from src.agents.RLGNNAgent import RLGNNAgent
 from src.agents.RandomAgent import RandomAgent
 from src.engine.AgentBase import AgentBase
@@ -24,7 +26,7 @@ def construct_agent(agent_fqcn: str, num) -> AgentBase:
     elif "attila" in agent_fqcn.lower():
         agent = Attila()
     else:
-        agent = HumanAgent(agent_fqcn)
+        agent = eval(f"{agent_fqcn[:-2]}()")
     agent.agent_number = num
     return agent
 

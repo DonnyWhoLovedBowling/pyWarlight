@@ -25,7 +25,7 @@ class StatTracker:
 
     def std(self):
         n = self.s0
-        if n > 0:
+        if n > 1:
             std = np.sqrt((n * self.s2 - self.s1 * self.s1) / (n * (n - 1)))
         else:
             std = 0.0
@@ -54,10 +54,9 @@ class RewardNormalizer:
 
     def update(self, rewards: torch.Tensor):
 
-        batch = torch.tensor(rewards, dtype=torch.float32, device=rewards.device)
-        batch_mean = batch.mean().item()
-        batch_var = batch.var(unbiased=False).item()
-        batch_count = len(batch)
+        batch_mean = rewards.mean().item()
+        batch_var = rewards.var(unbiased=False).item()
+        batch_count = rewards.numel()
 
         delta = batch_mean - self.mean
         total_count = self.count + batch_count
@@ -73,7 +72,6 @@ class RewardNormalizer:
         self.count = total_count
 
     def normalize(self, rewards):
-        rewards = torch.tensor(rewards, dtype=torch.float32)
         return (rewards - self.mean) / (self.var ** 0.5 + 1e-8)
 
 @dataclass
@@ -86,7 +84,40 @@ class PrevStateBuffer:
                 [prev_state.number_of_armies_owned(pid) for pid in range(1, prev_state.config.num_players + 1) if
                  pid != player_id]
                 )
-    
+
+
+def pad_tensor_list(tensor_list, pad_value=-1, target_device=None):
+    """Pad list of tensors to same shape"""
+    if not tensor_list:
+        return torch.tensor([])
+
+    # Determine target device
+    if target_device is None:
+        target_device = tensor_list[0].device if tensor_list[0].numel() > 0 else 'cpu'
+
+    # Find max dimensions
+    max_dim0 = max(t.size(0) if t.numel() > 0 else 0 for t in tensor_list)
+    # Check if we're dealing with 2D tensors by examining non-empty tensors
+    is_2d = any(len(t.shape) > 1 and t.numel() > 0 for t in tensor_list)
+
+    if is_2d:
+        max_dim1 = max(t.size(1) if len(t.shape) > 1 and t.numel() > 0 else 0 for t in tensor_list)
+        padded = torch.full((len(tensor_list), max_dim0, max_dim1), pad_value,
+                            dtype=tensor_list[0].dtype, device=target_device)
+    else:
+        padded = torch.full((len(tensor_list), max_dim0), pad_value,
+                            dtype=tensor_list[0].dtype, device=target_device)
+
+    for i, tensor in enumerate(tensor_list):
+        if tensor.numel() > 0:
+            if len(tensor.shape) > 1:
+                padded[i, :tensor.size(0), :tensor.size(1)] = tensor
+            else:
+                padded[i, :tensor.size(0)] = tensor
+
+    return padded
+
+
 class RolloutBuffer:
     def __init__(self):
         self.edges = []
@@ -99,28 +130,6 @@ class RolloutBuffer:
         # Store as list of individual tensors instead of concatenated
         self.starting_node_features_list = []
         self.post_placement_node_features_list = []
-
-    def pad_tensor_list(self, tensor_list, pad_value=-1):
-        """Pad list of tensors to same shape"""
-        if not tensor_list:
-            return torch.tensor([])
-            
-        # Find max dimensions
-        max_dim0 = max(t.size(0) if t.numel() > 0 else 0 for t in tensor_list)
-        if len(tensor_list[0].shape) > 1:
-            max_dim1 = max(t.size(1) if t.numel() > 0 else 0 for t in tensor_list)
-            padded = torch.full((len(tensor_list), max_dim0, max_dim1), pad_value, dtype=tensor_list[0].dtype)
-        else:
-            padded = torch.full((len(tensor_list), max_dim0), pad_value, dtype=tensor_list[0].dtype)
-            
-        for i, tensor in enumerate(tensor_list):
-            if tensor.numel() > 0:
-                if len(tensor.shape) > 1:
-                    padded[i, :tensor.size(0), :tensor.size(1)] = tensor
-                else:
-                    padded[i, :tensor.size(0)] = tensor
-                    
-        return padded
 
     def get_edges(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -137,25 +146,27 @@ class RolloutBuffer:
 
     def get_attacks(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        padded = self.pad_tensor_list(self.attacks)
-        return padded.to(device)
+        padded = pad_tensor_list(self.attacks, pad_value=-1, target_device=device)
+        return padded
 
     def get_placements(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        padded = self.pad_tensor_list(self.placements)
-        return padded.to(device)
+        padded = pad_tensor_list(self.placements, pad_value=-1, target_device=device)
+        return padded
 
     def get_log_probs(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.log_probs, device=device)
+        if self.log_probs is None or not self.log_probs or any(x is None for x in self.log_probs):
+            return torch.tensor([], dtype=torch.float, device=device)
+        return torch.tensor(self.log_probs, dtype=torch.float, device=device)
 
     def get_rewards(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.rewards, device=device)
+        return torch.tensor(self.rewards, dtype=torch.float, device=device)
 
     def get_values(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.values, device=device)
+        return torch.tensor(self.values, dtype=torch.float, device=device)
 
     def get_dones(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -209,16 +220,17 @@ def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
         print("No checkpoint found, starting fresh.")
 
 
-def compute_gae(rewards, values, last_value, dones, gamma=0.95, lam=0.95):
+def compute_gae(rewards: torch.Tensor, values: torch.Tensor, last_value: torch.Tensor, dones: torch.Tensor, gamma=0.95, lam=0.95):
+    device = values.device
     advantages = []
     gae = 0
-    values = torch.cat([values, torch.tensor([last_value], dtype=values.dtype, device=values.device)])
+    values = torch.cat([values, torch.tensor([last_value], dtype=values.dtype, device=device)])
     for t in reversed(range(len(rewards))):
         delta = rewards[t] + gamma * values[t + 1] * (1 - dones[t]) - values[t]
         gae = delta + gamma * lam * (1 - dones[t]) * gae
         advantages.insert(0, gae)
     returns = [adv + val for adv, val in zip(advantages, values[:-1])]
-    return torch.tensor(advantages), torch.tensor(returns)
+    return torch.tensor(advantages, device=device), torch.tensor(returns, device=device)
 
 
 def compute_entropy(placement_logits, edge_logits, army_logits):
@@ -238,7 +250,7 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
     edge_probs = f.softmax(edge_logits, dim=-1)
     edge_entropy = -(edge_probs * f.log_softmax(edge_logits, dim=-1)).sum()
 
-    army_entropy = torch.zeros(1)
+    army_entropy = torch.zeros(1, device=placement_logits.device)
     for logits in army_logits:
         probs = f.softmax(logits, dim=-1)
         log_probs = f.log_softmax(logits, dim=-1)
@@ -291,43 +303,56 @@ def compute_log_probs(
     placement_log_prob = torch.gather(placement_log_probs, 1, placements.clamp(min=0))
     placement_log_prob = (placement_log_prob * placement_mask.float()).sum(dim=1)
     
-    # --- Attack log-probs (fully vectorized) ---
-    edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, 42]
-    
-    # Create vectorized edge lookup
-    action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, 42]
-    attacks_flat = attacks[:, :, 0] * num_nodes + attacks[:, :, 1]  # [batch_size, max_attacks]
-    
-    # Find matching edges using broadcasting
-    edge_matches = (attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, 42]
-    edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
-    
-    # Mask valid attacks and edges
-    attack_mask = (attacks[:, :, 0] >= 0)
-    edge_mask = (action_edges[:, :, 0] >= 0)  # Mask padded (-1,-1) edges
-    valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
-    
-    # Gather edge and army log-probs
-    batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
-    edge_lp = edge_log_probs[batch_idx, edge_indices] * valid_match_mask.float()
-    
-    # Army log-probs - FIX: Handle negative army values
-    army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, max_army_send]
-    army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
-    
-    # Clamp army indices to valid range and only gather for valid attacks
-    army_indices = attacks[:, :, 2].clamp(min=0, max=army_log_probs.size(2)-1)  # Clamp to [0, max_army_send-1]
-    army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)
-    
-    # Apply valid mask to army log-probs (zeros out padded attacks)
-    army_lp = army_lp * valid_match_mask.float()
-    
-    attack_log_prob = (edge_lp + army_lp).sum(dim=1)
-    
+
+    # Handle case where there are no attacks
+    if isinstance(attacks, list):
+        has_attacks = len(attacks) > 0
+    else:
+        has_attacks = attacks.numel() > 0
+
+    if not has_attacks:
+        # No attacks case - create empty tensors with proper shapes
+        attack_log_prob = torch.zeros(batch_size, dtype=torch.float, device=device)
+    else:
+        # Create vectorized edge lookup
+        action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, 42]
+
+        attacks_flat = attacks[:, :, 0] * num_nodes + attacks[:, :, 1]  # [batch_size, max_attacks]
+        # Find matching edges using broadcasting
+        edge_matches = (
+                    attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, 42]
+        edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
+
+        # Mask valid attacks and edges
+        attack_mask = (attacks[:, :, 0] >= 0)
+        edge_mask = (action_edges[:, :, 0] >= 0)  # Mask padded (-1,-1) edges
+        valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
+
+        # --- Attack log-probs (fully vectorized) ---
+        edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, 42]
+
+        # Gather edge and army log-probs
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
+        edge_lp = edge_log_probs[batch_idx, edge_indices] * valid_match_mask.float()
+
+        # Army log-probs - FIX: Handle negative army values
+        army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, max_army_send]
+        army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
+
+        # Clamp army indices to valid range and only gather for valid attacks
+        army_indices = attacks[:, :, 2].clamp(min=0,
+                                              max=army_log_probs.size(2) - 1)  # Clamp to [0, max_army_send-1]
+        army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)
+
+        # Apply valid mask to army log-probs (zeros out padded attacks)
+        army_lp = army_lp * valid_match_mask.float()
+
+        attack_log_prob = (edge_lp + army_lp).sum(dim=1)
+
     result = placement_log_prob + attack_log_prob
-    
+
     # If input was single sample, return scalar instead of batch
     if is_single_sample:
         result = result.squeeze(0)
-    
+
     return result
