@@ -3,7 +3,6 @@ learning*.txt
 *.csv
 *.pkl
 *.log
-*.json
 *.db
 *.sqlite
 *.db-journal
