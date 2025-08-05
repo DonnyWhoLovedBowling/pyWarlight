@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run simulation",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "Attila.1",
+                "RLGNNAgent.2",
+                "-sim",
+                "10000",
+                "-map",
+                "World"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
