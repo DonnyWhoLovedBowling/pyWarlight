@@ -44,5 +44,6 @@ learning*.txt
 *.pyx
 *.pyx.c
 *.pyx.o
-
-    
+*.0
+learning_stats*
+total_results*

@@ -32,7 +32,7 @@ from src.game.Region import Region
 
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.PlaceArmies import PlaceArmies
-from src.agents.RLUtils.RLUtils import RolloutBuffer, StatTracker, compute_log_probs, PrevStateBuffer
+from src.agents.RLUtils.RLUtils import RolloutBuffer, StatTracker, compute_log_probs, compute_individual_log_probs, PrevStateBuffer
 from src.agents.RLUtils.PPOAgent import PPOAgent
 
 import faulthandler
@@ -54,7 +54,7 @@ class RLGNNAgent(AgentBase):
     value = torch.tensor([])
     action_edges = torch.tensor([])
     buffer = RolloutBuffer()
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-6)
     ppo_agent = PPOAgent(model, optimizer, gamma=0.99, lam=0.95, clip_eps=0.2)
     starting_node_features: torch.Tensor = None
     post_placement_node_features: torch.Tensor= None
@@ -62,8 +62,7 @@ class RLGNNAgent(AgentBase):
     moves_this_turn = []
     total_rewards = defaultdict(float)
     prev_state: PrevStateBuffer = None
-    learning_stats_file: TextIOWrapper = open(f"learning_stats_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt", "a")
-    writer = SummaryWriter(log_dir="analysis/logs/Julius_World_balanced_v3_entropy_batched_atilla_checkpoint")  # Store data here
+    writer = SummaryWriter(log_dir="analysis/logs/Julius_World_balanced_v3_entropy_batched_scratch")  # Store data here
 
     game_number = 1
     num_attack_tracker = StatTracker()
@@ -86,7 +85,6 @@ class RLGNNAgent(AgentBase):
     def init(self, timeout_millis: int):
         random.seed(time.time())
         faulthandler.enable()
-        self.learning_stats_file.write("clip: 0.2; gamma: 0.99; lam: 0.95; lr: 5e-5; entropy_factor: 0.01\n")
 
 
     def run_model(self, node_features: torch.Tensor, action_edges: torch.Tensor = None, action: Literal[Phase] = None):
@@ -275,15 +273,13 @@ class RLGNNAgent(AgentBase):
         if len(ret) == 0:
             logging.warning("no placements")
         # After placements are determined
-        placement_tensor = []
-        placement_per_n_neigbors_tensor = []
         placements_next_to_enemy = 0
         total_placements = 0
         for ix, p in enumerate(placement.tolist()):
-            for _ in range(p):
-                self.placement_regions.append(torch.tensor(ix-0.5))
-                n_neighbors = len(game.world.regions[ix].get_neighbours())-0.5
-                self.placement_neighbours.append(torch.tensor(n_neighbors))
+            # for _ in range(p):
+            #     self.placement_regions.append(torch.tensor(ix-0.5))
+            #     n_neighbors = len(game.world.regions[ix].get_neighbours())-0.5
+            #     self.placement_neighbours.append(torch.tensor(n_neighbors))
             if p > 0:
                 total_placements += p
             # Check if region has an enemy neighbor
@@ -362,12 +358,12 @@ class RLGNNAgent(AgentBase):
         self.writer.add_scalar('turn_with_mult_attacks', self.total_rewards['turn_with_mult_attacks'] / game.round, self.game_number)
         self.writer.add_scalar('num_regions', self.total_rewards['num_regions'] / game.round, self.game_number)
         self.writer.add_scalar('army_difference', self.total_rewards['army_difference'] / game.round, self.game_number)
-        self.writer.add_histogram("Placements/region",
-                                  torch.tensor(self.placement_regions, dtype=torch.float16),
-                                  self.game_number)
-        self.writer.add_histogram("Placements/n_neighbours",
-                                  torch.tensor(self.placement_neighbours, dtype=torch.float16),
-                                  self.game_number)
+        # self.writer.add_histogram("Placements/region",
+        #                           torch.tensor(self.placement_regions, dtype=torch.float16),
+        #                           self.game_number)
+        # self.writer.add_histogram("Placements/n_neighbours",
+        #                           torch.tensor(self.placement_neighbours, dtype=torch.float16),
+        #                           self.game_number)
 
         for key, value in self.total_rewards.items():
             if key in ['missed opportunities', 'missed transfers', 'turn_with_attack', 'turn_with_mult_attacks', 'num_regions', 'army_difference']:
@@ -389,13 +385,20 @@ class RLGNNAgent(AgentBase):
         placements = self.get_placements()
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
+        
+        # Compute individual log probabilities for each action
+        placement_log_probs, attack_log_probs = compute_individual_log_probs(
+            attacks_tensor, self.attack_logits, self.army_logits, placements_tensor,
+            self.placement_logits, self.action_edges
+        )
+        
         # Store transition in buffer
         self.buffer.add(
             self.action_edges,
             attacks,
             placements,
-            compute_log_probs(attacks_tensor, self.attack_logits, self.army_logits, placements_tensor,
-                              self.placement_logits, self.action_edges),
+            placement_log_probs,
+            attack_log_probs,
             reward,
             value,
             done,

@@ -123,7 +123,8 @@ class RolloutBuffer:
         self.edges = []
         self.attacks = []
         self.placements = []
-        self.log_probs = []
+        self.placement_log_probs = []  # Store individual placement log probs
+        self.attack_log_probs = []     # Store individual attack log probs
         self.rewards = []
         self.values = []
         self.dones = []
@@ -154,11 +155,32 @@ class RolloutBuffer:
         padded = pad_tensor_list(self.placements, pad_value=-1, target_device=device)
         return padded
 
-    def get_log_probs(self):
+    def get_placement_log_probs(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        if self.log_probs is None or not self.log_probs or any(x is None for x in self.log_probs):
+        if not self.placement_log_probs:
             return torch.tensor([], dtype=torch.float, device=device)
-        return torch.tensor(self.log_probs, dtype=torch.float, device=device)
+        return pad_tensor_list(self.placement_log_probs, pad_value=0.0, target_device=device)
+
+    def get_attack_log_probs(self):
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not self.attack_log_probs:
+            return torch.tensor([], dtype=torch.float, device=device)
+        return pad_tensor_list(self.attack_log_probs, pad_value=0.0, target_device=device)
+
+    def get_log_probs(self):
+        """Legacy method for backward compatibility - returns summed log probs"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        placement_lp = self.get_placement_log_probs()
+        attack_lp = self.get_attack_log_probs()
+        
+        if placement_lp.numel() == 0 and attack_lp.numel() == 0:
+            return torch.tensor([], dtype=torch.float, device=device)
+        
+        # Sum individual log probs to get total log prob per episode
+        placement_sum = placement_lp.sum(dim=1) if placement_lp.numel() > 0 else torch.zeros(len(self.rewards), device=device)
+        attack_sum = attack_lp.sum(dim=1) if attack_lp.numel() > 0 else torch.zeros(len(self.rewards), device=device)
+        
+        return placement_sum + attack_sum
 
     def get_rewards(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -189,14 +211,24 @@ class RolloutBuffer:
         
         return torch.stack(self.post_placement_node_features_list).to(device)
 
-    def add(self, edges, attacks, placements, log_prob, reward, value, done, starting_node_features, post_placement_node_features):
+    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features):
         self.edges.append(edges)
-        # Convert attacks and placements to torch.Tensor for compatibility with compute_log_probs
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
         self.attacks.append(attacks_tensor)
         self.placements.append(placements_tensor)
-        self.log_probs.append(log_prob)
+        
+        # Store individual log probabilities
+        if isinstance(placement_log_probs, torch.Tensor):
+            self.placement_log_probs.append(placement_log_probs.detach().cpu())
+        else:
+            self.placement_log_probs.append(torch.tensor(placement_log_probs, dtype=torch.float))
+            
+        if isinstance(attack_log_probs, torch.Tensor):
+            self.attack_log_probs.append(attack_log_probs.detach().cpu())
+        else:
+            self.attack_log_probs.append(torch.tensor(attack_log_probs, dtype=torch.float))
+            
         self.rewards.append(reward)
         self.values.append(value)
         self.dones.append(done)
@@ -258,6 +290,108 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
     return placement_entropy, edge_entropy, army_entropy
 
 
+def compute_individual_log_probs(
+    attacks: torch.Tensor,            # [batch_size, max_attacks, 3] (src, tgt, armies)
+    attack_logits: torch.Tensor,      # [batch_size, 42] - PADDED
+    army_logits: torch.Tensor,        # [batch_size, 42, max_army_send] - PADDED  
+    placements: torch.Tensor,         # [batch_size, max_placements]
+    placement_logits: torch.Tensor,   # [batch_size, num_nodes]
+    action_edges: torch.Tensor        # [batch_size, 42, 2] - PADDED with (-1,-1)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute individual action log probabilities for per-action PPO ratio calculation.
+    Returns separate placement and attack log probabilities for each action.
+    
+    Returns:
+        placement_log_probs: [batch_size, max_placements] - log prob for each placement
+        attack_log_probs: [batch_size, max_attacks] - log prob for each attack (edge + army)
+    """
+    device = placement_logits.device
+    
+    # Handle non-batch inputs by adding batch dimension
+    if placement_logits.dim() == 1:
+        # Single sample case - convert all inputs to batch format
+        num_nodes = placement_logits.size(0)
+        placement_logits = placement_logits.unsqueeze(0)  # [1, num_nodes]
+        
+        # Handle other tensors that might also be non-batched
+        if attack_logits.dim() == 1:
+            attack_logits = attack_logits.unsqueeze(0)  # [1, 42]
+        if army_logits.dim() == 2:
+            army_logits = army_logits.unsqueeze(0)  # [1, 42, max_army_send]
+        if placements.dim() == 1:
+            placements = placements.unsqueeze(0)  # [1, max_placements]
+        if attacks.dim() == 2:
+            attacks = attacks.unsqueeze(0)  # [1, max_attacks, 3]
+        if action_edges.dim() == 2:
+            action_edges = action_edges.unsqueeze(0)  # [1, 42, 2]
+            
+        batch_size = 1
+        is_single_sample = True
+    else:
+        # Batch case - placement_logits is [batch_size, num_nodes]
+        num_nodes = placement_logits.size(1)
+        batch_size = placement_logits.size(0)
+        is_single_sample = False
+    
+    # --- Individual placement log-probs ---
+    placement_log_probs_full = f.log_softmax(placement_logits, dim=-1)  # [batch_size, num_nodes]
+    placement_mask = placements >= 0
+    placement_log_probs = torch.gather(placement_log_probs_full, 1, placements.clamp(min=0))  # [batch_size, max_placements]
+    placement_log_probs = placement_log_probs * placement_mask.float()  # Zero out padded placements
+    
+    # --- Individual attack log-probs ---
+    # Handle case where there are no attacks
+    if isinstance(attacks, list):
+        has_attacks = len(attacks) > 0
+    else:
+        has_attacks = attacks.numel() > 0
+
+    if not has_attacks:
+        # No attacks case - create empty tensors with proper shapes
+        max_attacks = attacks.shape[1] if attacks.numel() > 0 else 1
+        attack_log_probs = torch.zeros(batch_size, max_attacks, dtype=torch.float, device=device)
+    else:
+        # Create vectorized edge lookup
+        action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, 42]
+        attacks_flat = attacks[:, :, 0] * num_nodes + attacks[:, :, 1]  # [batch_size, max_attacks]
+        
+        # Find matching edges using broadcasting
+        edge_matches = (attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, 42]
+        edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
+
+        # Mask valid attacks and edges
+        attack_mask = (attacks[:, :, 0] >= 0)
+        valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
+
+        # --- Individual attack log-probs (edge + army) ---
+        edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, 42]
+
+        # Gather edge and army log-probs
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
+        edge_lp = edge_log_probs[batch_idx, edge_indices] * valid_match_mask.float()  # [batch_size, max_attacks]
+
+        # Army log-probs
+        army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, max_army_send]
+        army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
+
+        # Clamp army indices to valid range and only gather for valid attacks
+        army_indices = attacks[:, :, 2].clamp(min=0, max=army_log_probs.size(2) - 1)  # Clamp to [0, max_army_send-1]
+        army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)  # [batch_size, max_attacks]
+
+        # Apply valid mask to army log-probs (zeros out padded attacks)
+        army_lp = army_lp * valid_match_mask.float()
+
+        attack_log_probs = edge_lp + army_lp  # [batch_size, max_attacks] - individual attack log probs
+
+    # If input was single sample, squeeze batch dimension
+    if is_single_sample:
+        placement_log_probs = placement_log_probs.squeeze(0)
+        attack_log_probs = attack_log_probs.squeeze(0)
+
+    return placement_log_probs, attack_log_probs
+
+
 def compute_log_probs(
     attacks: torch.Tensor,            # [batch_size, max_attacks, 3] (src, tgt, armies)
     attack_logits: torch.Tensor,      # [batch_size, 42] - PADDED
@@ -268,6 +402,7 @@ def compute_log_probs(
 ) -> torch.Tensor:
     """
     Fully vectorized with consistent 42-edge padding across all batches
+    Returns total log probability by summing individual action log probabilities
     """
     device = placement_logits.device
     
