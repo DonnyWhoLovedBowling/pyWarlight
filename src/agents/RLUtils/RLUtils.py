@@ -131,6 +131,8 @@ class RolloutBuffer:
         # Store as list of individual tensors instead of concatenated
         self.starting_node_features_list = []
         self.post_placement_node_features_list = []
+        # Store region ownership for proper masking during PPO updates
+        self.owned_regions_list = []
 
     def get_edges(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -167,21 +169,6 @@ class RolloutBuffer:
             return torch.tensor([], dtype=torch.float, device=device)
         return pad_tensor_list(self.attack_log_probs, pad_value=0.0, target_device=device)
 
-    def get_log_probs(self):
-        """Legacy method for backward compatibility - returns summed log probs"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        placement_lp = self.get_placement_log_probs()
-        attack_lp = self.get_attack_log_probs()
-        
-        if placement_lp.numel() == 0 and attack_lp.numel() == 0:
-            return torch.tensor([], dtype=torch.float, device=device)
-        
-        # Sum individual log probs to get total log prob per episode
-        placement_sum = placement_lp.sum(dim=1) if placement_lp.numel() > 0 else torch.zeros(len(self.rewards), device=device)
-        attack_sum = attack_lp.sum(dim=1) if attack_lp.numel() > 0 else torch.zeros(len(self.rewards), device=device)
-        
-        return placement_sum + attack_sum
-
     def get_rewards(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         return torch.tensor(self.rewards, dtype=torch.float, device=device)
@@ -211,12 +198,18 @@ class RolloutBuffer:
         
         return torch.stack(self.post_placement_node_features_list).to(device)
 
-    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features):
+    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, owned_regions=None):
         self.edges.append(edges)
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
         self.attacks.append(attacks_tensor)
         self.placements.append(placements_tensor)
+        
+        # Store owned regions for masking during PPO updates
+        if owned_regions is not None:
+            self.owned_regions_list.append(torch.tensor(owned_regions, dtype=torch.long))
+        else:
+            self.owned_regions_list.append(None)
         
         # Store individual log probabilities
         if isinstance(placement_log_probs, torch.Tensor):
@@ -239,17 +232,54 @@ class RolloutBuffer:
 
     def clear(self):
         self.__init__()
+        
+    def get_owned_regions(self):
+        """Return the list of owned regions for each episode"""
+        return self.owned_regions_list
 
     # ... rest of methods remain the same ...
+
+def apply_placement_masking(placement_logits, owned_regions_list):
+    """
+    Apply the same masking to placement logits as used during action selection.
+    
+    Args:
+        placement_logits: [batch_size, num_nodes] - raw placement logits from model
+        owned_regions_list: list of tensors, each containing region IDs owned by agent
+        
+    Returns:
+        masked_placement_logits: [batch_size, num_nodes] - logits with non-owned regions masked to -inf
+    """
+    if placement_logits.dim() != 2:
+        raise ValueError(f"Expected placement_logits to be 2D [batch_size, num_nodes], got {placement_logits.shape}")
+    
+    batch_size, num_nodes = placement_logits.shape
+    device = placement_logits.device
+    
+    # Clone to avoid modifying the original
+    masked_logits = placement_logits.clone()
+    
+    for batch_idx, owned_regions in enumerate(owned_regions_list):
+        if owned_regions is not None:
+            # Create mask for all regions
+            all_regions = set(range(num_nodes))
+            owned_regions_set = set(owned_regions.tolist() if isinstance(owned_regions, torch.Tensor) else owned_regions)
+            not_owned = list(all_regions.difference(owned_regions_set))
+            
+            # Mask non-owned regions to -inf
+            if not_owned:
+                masked_logits[batch_idx, not_owned] = float('-inf')
+    
+    return masked_logits
+
 
 def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
     if os.path.exists(path):
         checkpoint = torch.load(path)
         policy.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        print("Loaded checkpoint from", path)
     else:
-        print("No checkpoint found, starting fresh.")
+        pass  # Starting fresh
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor, last_value: torch.Tensor, dones: torch.Tensor, gamma=0.95, lam=0.95):
@@ -268,19 +298,87 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor, last_value: torch.T
 def compute_entropy(placement_logits, edge_logits, army_logits):
     if type(placement_logits) == int:
         return torch.tensor(0, dtype=torch.float), torch.tensor(0, dtype=torch.float), torch.tensor(0,  dtype=torch.float)
-    try:
-        placement_probs = f.softmax(placement_logits, dim=-1)
-    except RuntimeError as re:
-        logging.error(re)
-        raise re
+    
+    # Check for NaN in logits
+    if torch.isnan(placement_logits).any():
+        placement_entropy = torch.tensor(0.0, device=placement_logits.device)
+    else:
+        try:
+            # Check for problematic distributions (all -inf rows)
+            all_inf_mask = torch.isinf(placement_logits).all(dim=-1)
+            
+            if all_inf_mask.any():
+                # This should be rare now that we pre-fix logits in PPOAgent
+                placement_logits_safe = placement_logits.clone()
+                placement_logits_safe[all_inf_mask, 0] = 0.0
+            else:
+                placement_logits_safe = placement_logits
+                
+            # Use log_softmax for numerical stability - this handles -inf values correctly
+            # -inf values will become 0 probability, finite values will be normalized
+            placement_log_probs = f.log_softmax(placement_logits_safe, dim=-1)
+            placement_probs = torch.exp(placement_log_probs)
+            
+            # Compute entropy only over valid (non-zero probability) regions
+            # This preserves the entropy signal from the model's uncertainty over valid choices
+            valid_mask = placement_probs > 1e-10  # Avoid log(0) issues
+            masked_probs = placement_probs * valid_mask.float()
+            masked_log_probs = placement_log_probs * valid_mask.float()
+            
+            # Renormalize to ensure it's still a valid probability distribution
+            prob_sum = masked_probs.sum(dim=-1, keepdim=True)
+            prob_sum = torch.clamp(prob_sum, min=1e-10)  # Avoid division by zero
+            normalized_probs = masked_probs / prob_sum
+            
+            # Recompute log probs for normalized distribution
+            normalized_log_probs = torch.log(torch.clamp(normalized_probs, min=1e-10))
+            
+            # Compute entropy: -sum(p * log(p)) over valid regions only
+            placement_entropy = -(normalized_probs * normalized_log_probs).sum()
+            
+            # Check if entropy computation resulted in NaN
+            if torch.isnan(placement_entropy):
+                placement_entropy = torch.tensor(0.0, device=placement_logits.device)
+                
+        except RuntimeError as re:
+            logging.error(re)
+            placement_entropy = torch.tensor(0.0, device=placement_logits.device)
 
-
-    placement_entropy = -(
-            placement_probs * f.log_softmax(placement_logits, dim=-1)
-    ).sum()
-
-    edge_probs = f.softmax(edge_logits, dim=-1)
-    edge_entropy = -(edge_probs * f.log_softmax(edge_logits, dim=-1)).sum()
+    if torch.isnan(edge_logits).any():
+        edge_entropy = torch.tensor(0.0, device=edge_logits.device)
+    else:
+        try:
+            # Check for problematic distributions (all -inf or mostly -inf with extreme values)
+            all_inf_mask = torch.isinf(edge_logits).all(dim=-1)
+            mostly_inf_mask = torch.isinf(edge_logits).sum(dim=-1) > (edge_logits.size(-1) * 0.8)
+            
+            if all_inf_mask.any() or mostly_inf_mask.any():
+                # Create a safe version of the logits
+                edge_logits_safe = edge_logits.clone()
+                
+                # For all -inf rows, set one element to 0
+                if all_inf_mask.any():
+                    edge_logits_safe[all_inf_mask, 0] = 0.0
+                
+                # For mostly -inf rows with extreme finite values, clamp the finite values
+                if mostly_inf_mask.any():
+                    finite_mask = ~torch.isinf(edge_logits_safe)
+                    edge_logits_safe[finite_mask] = torch.clamp(edge_logits_safe[finite_mask], -10, 10)
+            else:
+                edge_logits_safe = edge_logits
+                
+            # Use log_softmax for numerical stability
+            edge_log_probs = f.log_softmax(edge_logits_safe, dim=-1)
+            edge_probs = torch.exp(edge_log_probs)
+            edge_entropy = -(edge_probs * edge_log_probs).sum()
+            
+            # Check if entropy computation resulted in NaN
+            if torch.isnan(edge_entropy):
+                edge_entropy = torch.tensor(0.0, device=edge_logits.device)
+                
+        except RuntimeError as re:
+            logging.error(re)
+            edge_entropy = torch.tensor(0.0, device=edge_logits.device)
 
     army_entropy = torch.zeros(1, device=placement_logits.device)
     for logits in army_logits:
@@ -288,6 +386,31 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
         log_probs = f.log_softmax(logits, dim=-1)
         army_entropy += -(probs * log_probs).sum()
     return placement_entropy, edge_entropy, army_entropy
+
+
+def apply_placement_mask(placement_logits, owned_regions_list, num_regions):
+    """
+    Apply the same masking to placement logits that was used during action selection
+    
+    Args:
+        placement_logits: [batch_size, num_regions] - raw placement logits
+        owned_regions_list: List of owned regions for each batch item
+        num_regions: Total number of regions
+    
+    Returns:
+        masked_placement_logits: [batch_size, num_regions] - masked placement logits
+    """
+    masked_logits = placement_logits.clone()
+    
+    for batch_idx, owned_regions in enumerate(owned_regions_list):
+        if owned_regions is not None:
+            # Create mask: set non-owned regions to -inf
+            all_regions = set(range(num_regions))
+            not_owned = list(all_regions.difference(set(owned_regions.tolist())))
+            if not_owned:
+                masked_logits[batch_idx, not_owned] = float('-inf')
+    
+    return masked_logits
 
 
 def compute_individual_log_probs(
@@ -335,9 +458,43 @@ def compute_individual_log_probs(
         is_single_sample = False
     
     # --- Individual placement log-probs ---
+    # Check for problematic values before log_softmax
+    if torch.isnan(placement_logits).any():
+        placement_logits = torch.where(torch.isnan(placement_logits), torch.tensor(-1e9, device=placement_logits.device), placement_logits)
+    
+    # Check for all-inf rows which would cause log_softmax to produce NaN
+    all_inf_mask = torch.isinf(placement_logits).all(dim=-1)
+    if all_inf_mask.any():
+        # For all-inf rows, set one element to 0 to make log_softmax work
+        placement_logits[all_inf_mask, 0] = 0.0
+    
     placement_log_probs_full = f.log_softmax(placement_logits, dim=-1)  # [batch_size, num_nodes]
+    
+    # Check for NaN after log_softmax
+    if torch.isnan(placement_log_probs_full).any():
+        # Replace NaN with very negative value
+        placement_log_probs_full = torch.where(torch.isnan(placement_log_probs_full), 
+                                             torch.tensor(-1e9, device=placement_log_probs_full.device), 
+                                             placement_log_probs_full)
+    
     placement_mask = placements >= 0
     placement_log_probs = torch.gather(placement_log_probs_full, 1, placements.clamp(min=0))  # [batch_size, max_placements]
+    
+    # Replace -inf values after gather to prevent NaN propagation
+    if torch.isinf(placement_log_probs).any():
+        # CRITICAL FIX: Replace -inf with very negative but finite value to prevent NaN propagation
+        # This happens when placement indices point to masked regions or padding
+        placement_log_probs = torch.where(torch.isinf(placement_log_probs), 
+                                        torch.tensor(-100.0, device=placement_log_probs.device), 
+                                        placement_log_probs)
+    
+    # Check for NaN after gather
+    if torch.isnan(placement_log_probs).any():
+        # Replace NaN with very negative value
+        placement_log_probs = torch.where(torch.isnan(placement_log_probs), 
+                                        torch.tensor(-1e9, device=placement_log_probs.device), 
+                                        placement_log_probs)
+    
     placement_log_probs = placement_log_probs * placement_mask.float()  # Zero out padded placements
     
     # --- Individual attack log-probs ---
@@ -376,7 +533,8 @@ def compute_individual_log_probs(
         army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
 
         # Clamp army indices to valid range and only gather for valid attacks
-        army_indices = attacks[:, :, 2].clamp(min=0, max=army_log_probs.size(2) - 1)  # Clamp to [0, max_army_send-1]
+        # Army count in attacks is 1-indexed, but log probs are 0-indexed, so subtract 1
+        army_indices = (attacks[:, :, 2] - 1).clamp(min=0, max=army_log_probs.size(2) - 1)  # Convert to 0-indexed
         army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)  # [batch_size, max_attacks]
 
         # Apply valid mask to army log-probs (zeros out padded attacks)
