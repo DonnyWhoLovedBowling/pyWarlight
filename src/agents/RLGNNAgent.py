@@ -14,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
+from src.agents.RLUtils.ModelFactory import ModelFactory
 from src.game.FightSide import FightSide
 from src.game.Phase import Phase
 from src.config.training_config import TrainingConfig, ConfigFactory
@@ -47,7 +48,16 @@ class RLGNNAgent(AgentBase):
     hidden_channels = 64
     batch_size = 24  # Restored - root cause was edge masking inconsistency, not model drift
     device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
-    model = WarlightPolicyNet(in_channels, hidden_channels).to(device)
+    
+    # Use factory to create model based on config
+    config = ConfigFactory.create('residual_model')  # Try residual model for better stability
+    model = ModelFactory.create_model(
+        model_type=config.model.model_type,
+        node_feat_dim=config.model.in_channels,
+        embed_dim=config.model.embed_dim,
+        max_army_send=config.model.max_army_send
+    ).to(device)
+
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
     army_logits = torch.tensor([])
@@ -59,10 +69,18 @@ class RLGNNAgent(AgentBase):
     actual_attack_log_probs = torch.tensor([])
     
     buffer = RolloutBuffer()
-    config = ConfigFactory.create('conservative_multi_epoch')  # Revert to stable config that was working
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.learning_rate)  # Use config learning rate
     ppo_agent = PPOAgent(model, optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
-                         verification_config=config.verification)  # Enhanced PPO with adaptive epochs
+                         ppo_epochs=config.ppo.ppo_epochs, adaptive_epochs=config.ppo.adaptive_epochs,
+                         gradient_clip_norm=config.ppo.gradient_clip_norm, value_loss_coeff=config.ppo.value_loss_coeff,
+                         value_clip_range=config.ppo.value_clip_range,
+                         entropy_coeff_start=config.ppo.entropy_coeff_start,
+                         entropy_coeff_decay=config.ppo.entropy_coeff_decay,
+                         entropy_decay_episodes=config.ppo.entropy_decay_episodes,
+                         placement_entropy_coeff=config.ppo.placement_entropy_coeff,
+                         edge_entropy_coeff=config.ppo.edge_entropy_coeff,
+                         army_entropy_coeff=config.ppo.army_entropy_coeff,
+                         verification_config=config.verification)  # Enhanced PPO with entropy configuration
     starting_node_features: torch.Tensor = None
     post_placement_node_features: torch.Tensor= None
 
@@ -110,17 +128,63 @@ class RLGNNAgent(AgentBase):
         Args:
             config: TrainingConfig containing all training parameters
         """
-        # Update PPO configuration
-        self.ppo_agent.gamma = config.ppo.gamma
-        self.ppo_agent.lam = config.ppo.lam
-        self.ppo_agent.clip_eps = config.ppo.clip_eps
-        self.ppo_agent.ppo_epochs = config.ppo.ppo_epochs
-        self.ppo_agent.adaptive_epochs = config.ppo.adaptive_epochs
-        self.ppo_agent.gradient_clip_norm = config.ppo.gradient_clip_norm
+        # Update model if architecture changed
+        if hasattr(config.model, 'model_type') and config.model.model_type != self.config.model.model_type:
+            print(f"🔄 Switching model architecture from {self.config.model.model_type} to {config.model.model_type}")
+            
+            # Create new model with the specified architecture
+            new_model = ModelFactory.create_model(
+                model_type=config.model.model_type,
+                node_feat_dim=config.model.in_channels,
+                embed_dim=config.model.embed_dim,
+                max_army_send=config.model.max_army_send
+            ).to(self.device)
+            
+            # Replace the model
+            self.model = new_model
+            
+            # Recreate optimizer for new model parameters
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.ppo.learning_rate)
+            
+            # Recreate PPO agent with new model
+            self.ppo_agent = PPOAgent(self.model, self.optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
+                                     ppo_epochs=config.ppo.ppo_epochs, adaptive_epochs=config.ppo.adaptive_epochs,
+                                     gradient_clip_norm=config.ppo.gradient_clip_norm, value_loss_coeff=config.ppo.value_loss_coeff,
+                                     value_clip_range=config.ppo.value_clip_range,
+                                     entropy_coeff_start=config.ppo.entropy_coeff_start,
+                                     entropy_coeff_decay=config.ppo.entropy_coeff_decay,
+                                     entropy_decay_episodes=config.ppo.entropy_decay_episodes,
+                                     placement_entropy_coeff=config.ppo.placement_entropy_coeff,
+                                     edge_entropy_coeff=config.ppo.edge_entropy_coeff,
+                                     army_entropy_coeff=config.ppo.army_entropy_coeff,
+                                     verification_config=config.verification)
+        else:
+            # Update existing PPO configuration
+            self.ppo_agent.gamma = config.ppo.gamma
+            self.ppo_agent.lam = config.ppo.lam
+            self.ppo_agent.clip_eps = config.ppo.clip_eps
+            self.ppo_agent.ppo_epochs = config.ppo.ppo_epochs
+            self.ppo_agent.adaptive_epochs = config.ppo.adaptive_epochs
+            self.ppo_agent.gradient_clip_norm = config.ppo.gradient_clip_norm
+            self.ppo_agent.value_loss_coeff = config.ppo.value_loss_coeff
+            self.ppo_agent.value_clip_range = getattr(config.ppo, 'value_clip_range', None)
+            
+            # Update entropy configuration
+            self.ppo_agent.entropy_coeff_start = config.ppo.entropy_coeff_start
+            self.ppo_agent.entropy_coeff_decay = config.ppo.entropy_coeff_decay
+            self.ppo_agent.entropy_decay_episodes = config.ppo.entropy_decay_episodes
+            self.ppo_agent.placement_entropy_coeff = config.ppo.placement_entropy_coeff
+            self.ppo_agent.edge_entropy_coeff = config.ppo.edge_entropy_coeff
+            self.ppo_agent.army_entropy_coeff = config.ppo.army_entropy_coeff
+            
+            # Update optimizer learning rate
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = config.ppo.learning_rate
         
-        # Update optimizer learning rate
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = config.ppo.learning_rate
+        # Update batch size if it changed
+        if hasattr(config.ppo, 'batch_size') and config.ppo.batch_size != self.batch_size:
+            self.batch_size = config.ppo.batch_size
+            print(f"📦 Updated batch size to {self.batch_size}")
         
         # Update verification configuration
         self._batch_verification_enabled = config.verification.batch_verification_enabled
@@ -138,7 +202,11 @@ class RLGNNAgent(AgentBase):
                 self.writer.close()
                 self.writer = SummaryWriter(log_dir=experiment_log_dir)
         
+        # Store the new config
+        self.config = config
+        
         print(f"📝 Applied training configuration: {config.logging.experiment_name}")
+        print(f"🏗️  Model architecture: {config.model.model_type}")
         print(config.summary())
     
     @override
@@ -570,7 +638,8 @@ class RLGNNAgent(AgentBase):
     def end_move(self, game: Game):
         if len(self.moves_this_turn) == 0 and not game.is_done():
             return
-        value = self.model.get_value(torch.tensor(self.post_placement_node_features, dtype=torch.float32)).detach()
+        end_features = torch.tensor(game.create_node_features(), dtype=torch.float32, device=self.device)
+        value = self.model.get_value(end_features).detach()
         done = int(game.is_done())
         reward = self.compute_rewards(game)
         attacks = self.get_attacks()
@@ -611,13 +680,13 @@ class RLGNNAgent(AgentBase):
             done,
             self.starting_node_features.clone(),  # Deep copy to prevent reference issues
             self.post_placement_node_features.clone(),  # Deep copy to prevent reference issues
+            end_features.clone(),  # Deep copy to prevent reference issues
             owned_regions
         )
         self.prev_state = PrevStateBuffer(prev_state=game, player_id=self.agent_number)
 
         if game.round % self.batch_size == 0 or done:
-            with torch.no_grad():
-                next_value = self.model.get_value(self.post_placement_node_features) * (1 - done)
+            next_value = value * (1 - done)
             self.ppo_agent.update(self.buffer, next_value, self)
             self.buffer.clear()
             self.model.to('cpu') # Move model to CPU after update to save memory

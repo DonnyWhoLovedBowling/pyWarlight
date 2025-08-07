@@ -131,6 +131,7 @@ class RolloutBuffer:
         # Store as list of individual tensors instead of concatenated
         self.starting_node_features_list = []
         self.post_placement_node_features_list = []
+        self.end_features_list = []
         # Store region ownership for proper masking during PPO updates
         self.owned_regions_list = []
 
@@ -198,7 +199,15 @@ class RolloutBuffer:
         
         return torch.stack(self.post_placement_node_features_list).to(device)
 
-    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, owned_regions=None):
+    def get_end_features(self):
+        """Return properly batched node features [batch_size, num_nodes, features]"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not self.end_features_list:
+            return torch.empty((0, 0, 8), dtype=torch.float32, device=device)
+        
+        return torch.stack(self.end_features_list).to(device)
+
+    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, end_features, owned_regions=None):
         self.edges.append(edges)
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
@@ -229,6 +238,7 @@ class RolloutBuffer:
         # Store individual tensors instead of concatenating
         self.starting_node_features_list.append(starting_node_features)
         self.post_placement_node_features_list.append(post_placement_node_features)
+        self.end_features_list.append(end_features)
 
     def clear(self):
         self.__init__()

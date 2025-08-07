@@ -8,6 +8,7 @@ from src.game.Phase import Phase
 from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_log_probs, compute_individual_log_probs, load_checkpoint
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 from src.config.training_config import VerificationConfig
+from src.agents.RLUtils.RLUtils import apply_placement_masking
 
 
 class PPOAgent:
@@ -23,6 +24,15 @@ class PPOAgent:
             adaptive_epochs=True,  # Enable adaptive epoch adjustment
             verification_config=None,  # New parameter for granular verification control
             gradient_clip_norm=0.1,  # Gradient clipping norm
+            value_loss_coeff=0.5,  # Value loss coefficient
+            value_clip_range=None,  # Value clipping range (None = no clipping)
+            # Entropy configuration parameters
+            entropy_coeff_start=0.5,  # Initial entropy coefficient
+            entropy_coeff_decay=0.3,  # How much entropy decays
+            entropy_decay_episodes=15000,  # Episodes over which to decay
+            placement_entropy_coeff=0.1,  # Placement entropy coefficient
+            edge_entropy_coeff=0.1,  # Edge entropy coefficient
+            army_entropy_coeff=0.003,  # Army entropy coefficient
     ):
         self.policy: WarlightPolicyNet = policy
         self.optimizer = optimizer
@@ -32,6 +42,17 @@ class PPOAgent:
         self.ppo_epochs = ppo_epochs
         self.adaptive_epochs = adaptive_epochs
         self.gradient_clip_norm = gradient_clip_norm
+        self.value_loss_coeff = value_loss_coeff
+        self.value_clip_range = value_clip_range
+        
+        # Entropy configuration
+        self.entropy_coeff_start = entropy_coeff_start
+        self.entropy_coeff_decay = entropy_coeff_decay
+        self.entropy_decay_episodes = entropy_decay_episodes
+        self.placement_entropy_coeff = placement_entropy_coeff
+        self.edge_entropy_coeff = edge_entropy_coeff
+        self.army_entropy_coeff = army_entropy_coeff
+        
         self.reward_normalizer = RewardNormalizer()
         self.adv_tracker = StatTracker()
         self.loss_tracker = StatTracker()
@@ -57,6 +78,49 @@ class PPOAgent:
         
         if 1==0:
             load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint.pt")
+    
+    def _pad_log_prob_tensors_to_match(self, new_tensor, old_tensor, tensor_name=""):
+        """
+        Ensure two log probability tensors have matching shapes by padding to maximum size.
+        
+        Args:
+            new_tensor: New log probabilities tensor [batch_size, num_actions]
+            old_tensor: Old log probabilities tensor [batch_size, num_actions]  
+            tensor_name: Name for debugging purposes
+            
+        Returns:
+            Tuple of (padded_new_tensor, padded_old_tensor) with matching shapes
+        """
+        if new_tensor.numel() == 0 or old_tensor.numel() == 0:
+            return new_tensor, old_tensor
+            
+        max_size = max(new_tensor.size(1), old_tensor.size(1))
+        
+        # Safety check for NaN in new tensor before padding
+        if torch.isnan(new_tensor).any():
+            new_tensor = torch.where(torch.isnan(new_tensor), 
+                                   torch.tensor(-1e9, device=new_tensor.device), 
+                                   new_tensor)
+        
+        # Pad or truncate new tensor
+        if new_tensor.size(1) < max_size:
+            padding = torch.zeros(new_tensor.size(0), 
+                                max_size - new_tensor.size(1), 
+                                device=new_tensor.device)
+            new_tensor = torch.cat([new_tensor, padding], dim=1)
+        elif new_tensor.size(1) > max_size:
+            new_tensor = new_tensor[:, :max_size]
+            
+        # Pad or truncate old tensor
+        if old_tensor.size(1) < max_size:
+            padding = torch.zeros(old_tensor.size(0), 
+                                max_size - old_tensor.size(1), 
+                                device=old_tensor.device)
+            old_tensor = torch.cat([old_tensor, padding], dim=1)
+        elif old_tensor.size(1) > max_size:
+            old_tensor = old_tensor[:, :max_size]
+            
+        return new_tensor, old_tensor
     
     def adjust_epochs_based_on_gradients(self, gradient_norm, agent):
         """
@@ -139,6 +203,12 @@ class PPOAgent:
             gamma=self.gamma,
             lam=self.lam
         )
+        
+        # Optional verification of GAE computation
+        self.verifier.verify_gae_computation(
+            normalized_rewards_tensor, buffer.get_values(), last_value, 
+            buffer.get_dones(), advantages, returns, self.gamma, self.lam
+        )
         self.value_tracker.log(buffer.get_values().mean().item())
         agent.total_rewards['normalized_reward'] = normalized_rewards_tensor.mean().item()
 
@@ -185,8 +255,13 @@ class PPOAgent:
             # Optional verification of model outputs
             self.verifier.verify_model_outputs(placement_logits, attack_logits, army_logits)
             
+            # Optional verification of single vs batch inference consistency (before masking)
+            self.verifier.verify_single_vs_batch_inference(
+                agent, starting_features_batched, post_features_batched, 
+                action_edges_batched, placement_logits, attack_logits, army_logits, buffer, epoch
+            )
+            
             # Apply the same masking that was used during action selection
-            from src.agents.RLUtils.RLUtils import apply_placement_masking
             owned_regions_list = buffer.get_owned_regions()
             placement_logits = apply_placement_masking(placement_logits, owned_regions_list)
             
@@ -195,15 +270,9 @@ class PPOAgent:
             if all_inf_mask.any():
                 placement_logits[all_inf_mask, 0] = 0.0
 
-            # Optional verification of single vs batch inference consistency
-            self.verifier.verify_single_vs_batch_inference(
-                agent, starting_features_batched, post_features_batched, 
-                action_edges_batched, placement_logits, attack_logits, army_logits, buffer
-            )
-
             # Optional verification of buffer data integrity
             self.verifier.verify_buffer_data_integrity(
-                starting_features_batched, post_features_batched, action_edges_batched
+                starting_features_batched, post_features_batched, action_edges_batched, epoch
             )
 
             # Get individual log probabilities for each action
@@ -234,44 +303,14 @@ class PPOAgent:
             attack_diff = new_attack_log_probs - old_attack_log_probs if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else torch.tensor([])
             
             # Ensure tensors have matching shapes by padding to the maximum size
-            if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0:
-                max_placement_size = max(new_placement_log_probs.size(1), old_placement_log_probs.size(1))
-                
-                # Safety check for NaN before padding
-                if torch.isnan(new_placement_log_probs).any():
-                    new_placement_log_probs = torch.where(torch.isnan(new_placement_log_probs), 
-                                                        torch.tensor(-1e9, device=new_placement_log_probs.device), 
-                                                        new_placement_log_probs)
-                
-                if new_placement_log_probs.size(1) < max_placement_size:
-                    padding = torch.zeros(new_placement_log_probs.size(0), 
-                                        max_placement_size - new_placement_log_probs.size(1), 
-                                        device=new_placement_log_probs.device)
-                    new_placement_log_probs = torch.cat([new_placement_log_probs, padding], dim=1)
-                elif new_placement_log_probs.size(1) > max_placement_size:
-                    new_placement_log_probs = new_placement_log_probs[:, :max_placement_size]
-                    
-                if old_placement_log_probs.size(1) < max_placement_size:
-                    padding = torch.zeros(old_placement_log_probs.size(0), 
-                                        max_placement_size - old_placement_log_probs.size(1), 
-                                        device=old_placement_log_probs.device)
-                    old_placement_log_probs = torch.cat([old_placement_log_probs, padding], dim=1)
-                elif old_placement_log_probs.size(1) > max_placement_size:
-                    old_placement_log_probs = old_placement_log_probs[:, :max_placement_size]
+            new_placement_log_probs, old_placement_log_probs = self._pad_log_prob_tensors_to_match(
+                new_placement_log_probs, old_placement_log_probs, "placement"
+            )
+            new_attack_log_probs, old_attack_log_probs = self._pad_log_prob_tensors_to_match(
+                new_attack_log_probs, old_attack_log_probs, "attack"
+            )
             
-            if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0:
-                max_attack_size = max(new_attack_log_probs.size(1), old_attack_log_probs.size(1))
-                if new_attack_log_probs.size(1) < max_attack_size:
-                    padding = torch.zeros(new_attack_log_probs.size(0), 
-                                        max_attack_size - new_attack_log_probs.size(1), 
-                                        device=new_attack_log_probs.device)
-                    new_attack_log_probs = torch.cat([new_attack_log_probs, padding], dim=1)
-                if old_attack_log_probs.size(1) < max_attack_size:
-                    padding = torch.zeros(old_attack_log_probs.size(0), 
-                                        max_attack_size - old_attack_log_probs.size(1), 
-                                        device=old_attack_log_probs.device)
-                    old_attack_log_probs = torch.cat([old_attack_log_probs, padding], dim=1)
-            # Calculate per-action ratios
+            # Recalculate per-action ratios after padding
             placement_diff = new_placement_log_probs - old_placement_log_probs if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0 else torch.tensor([])
             attack_diff = new_attack_log_probs - old_attack_log_probs if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else torch.tensor([])
             
@@ -381,8 +420,26 @@ class PPOAgent:
             if torch.isnan(policy_loss).any() or torch.isinf(policy_loss).any():
                 raise RuntimeError(f'policy_loss inf!: {ratio}, {advantages}')
             self.ratio_tracker.log(ratio.mean().item())
-            values_pred = self.policy.get_value(starting_features_batched)
-            value_loss = f.mse_loss(values_pred, returns)
+            values_pred = self.policy.get_value(buffer.get_end_features())
+            
+            # Optional verification of value computation
+            self.verifier.verify_value_computation(
+                agent, buffer.get_end_features(), buffer, values_pred, returns, advantages
+            )
+            
+            # Value loss with optional clipping for additional regularization
+            if self.value_clip_range is not None:
+                # Implement value clipping similar to policy clipping
+                old_values = buffer.get_values()
+                values_clipped = old_values + torch.clamp(
+                    values_pred - old_values, -self.value_clip_range, self.value_clip_range
+                )
+                value_loss_unclipped = f.mse_loss(values_pred, returns)
+                value_loss_clipped = f.mse_loss(values_clipped, returns)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+            else:
+                value_loss = f.mse_loss(values_pred, returns)
+                
             self.value_pred_tracker.log(values_pred.mean().item())
             
             # Fix placement_logits for entropy computation
@@ -412,9 +469,15 @@ class PPOAgent:
             self.act_loss_tracker.log(policy_loss.item())
             self.crit_loss_tracker.log(value_loss.item())
 
-            entropy_factor = 0.5 - (agent.game_number / 15000) * 0.3
-            loss = policy_loss + 0.5 * value_loss \
-                   - entropy_factor * (0.1 * placement_entropy + 0.1 * edge_entropy + 0.003 * army_entropy)
+            # Use configurable entropy coefficients and schedule
+            entropy_factor = self.entropy_coeff_start - (agent.game_number / self.entropy_decay_episodes) * self.entropy_coeff_decay
+            entropy_factor = max(entropy_factor, 0.01)  # Minimum entropy to maintain exploration
+            
+            entropy_loss = (self.placement_entropy_coeff * placement_entropy + 
+                          self.edge_entropy_coeff * edge_entropy + 
+                          self.army_entropy_coeff * army_entropy)
+            
+            loss = policy_loss + self.value_loss_coeff * value_loss - entropy_factor * entropy_loss
             self.loss_tracker.log(loss.mean().item())
 
             if torch.isnan(loss).any() or torch.isinf(loss).any():
