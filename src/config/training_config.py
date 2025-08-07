@@ -101,6 +101,7 @@ class VerificationConfig:
     # Output control
     print_first_n_episodes: int = 3              # Print details for first N episodes
     print_verification_summary: bool = True      # Print verification summaries
+    detailed_logging: bool = False                # Enable detailed verification logging
 
 
 @dataclass
@@ -426,6 +427,7 @@ class ConfigFactory:
             "sage_model": get_sage_model_config,
             "transformer_model": get_transformer_model_config,
             "residual_low_entropy": get_residual_low_entropy_config,
+            "reduced_army_send": get_reduced_army_send_config,
         }
         
         if config_name not in configs:
@@ -456,7 +458,7 @@ class ConfigFactory:
     @staticmethod
     def list_available() -> list[str]:
         """List all available pre-defined configurations"""
-        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy"]
+        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send"]
 
 
 def get_residual_model_config() -> TrainingConfig:
@@ -598,6 +600,47 @@ def get_transformer_model_config() -> TrainingConfig:
     
     # Logging
     config.logging.experiment_name = "transformer_model_stable"
+    config.logging.log_frequency = 50
+    
+    return config
+
+
+def get_reduced_army_send_config() -> TrainingConfig:
+    """Configuration with reduced max_army_send for lower army entropy"""
+    config = TrainingConfig()
+    
+    # Model settings with reduced army send
+    config.model.model_type = "residual"  # Use stable residual model
+    config.model.embed_dim = 64
+    config.model.max_army_send = 15  # Reduced from 50 to 15 for lower entropy
+    
+    # PPO settings optimized for reduced action space
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 1.0
+    config.ppo.value_loss_coeff = 0.2
+    config.ppo.value_clip_range = 0.3
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # Adjusted entropy schedule - less army entropy needed due to smaller action space
+    config.ppo.entropy_coeff_start = 0.8  # Slightly lower start
+    config.ppo.entropy_coeff_decay = 0.9
+    config.ppo.entropy_decay_episodes = 5000
+    config.ppo.placement_entropy_coeff = 0.2
+    config.ppo.edge_entropy_coeff = 0.3
+    config.ppo.army_entropy_coeff = 0.1  # Reduced army entropy (was 0.01)
+    
+    # Verification
+    config.verification.enabled = True
+    config.verification.gradient_norm_threshold = 1000.0
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    
+    # Logging
+    config.logging.experiment_name = "reduced_army_send_15"
     config.logging.log_frequency = 50
     
     return config

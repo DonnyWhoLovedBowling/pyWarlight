@@ -32,7 +32,7 @@ class PPOAgent:
             entropy_decay_episodes=15000,  # Episodes over which to decay
             placement_entropy_coeff=0.1,  # Placement entropy coefficient
             edge_entropy_coeff=0.1,  # Edge entropy coefficient
-            army_entropy_coeff=0.003,  # Army entropy coefficient
+            army_entropy_coeff=0.03,  # Army entropy coefficient
     ):
         self.policy: WarlightPolicyNet = policy
         self.optimizer = optimizer

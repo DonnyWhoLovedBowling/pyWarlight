@@ -50,7 +50,7 @@ class RLGNNAgent(AgentBase):
     device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
     
     # Use factory to create model based on config
-    config = ConfigFactory.create('residual_model')  # Try residual model for better stability
+    config = ConfigFactory.create('reduced_army_send')  # Use reduced army send configuration
     model = ModelFactory.create_model(
         model_type=config.model.model_type,
         node_feat_dim=config.model.in_channels,
@@ -425,7 +425,7 @@ class RLGNNAgent(AgentBase):
             # Pad army logits to [42, max_army_send]
             max_army_send = max(arl.size(1) if arl.numel() > 0 else 0 for arl in army_logits_list)
             if max_army_send == 0:
-                max_army_send = 50  # Default
+                max_army_send = self.config.model.max_army_send  # Use config value instead of hardcoded 50
 
             padded_army = []
             for arl in army_logits_list:

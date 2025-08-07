@@ -137,6 +137,11 @@ class PPOVerifier:
         # Only verify in the first epoch since model parameters change after training
         if epoch > 0:
             return
+        
+        # Store original training mode and set to eval for consistent verification
+        original_training_mode = agent.model.training
+        if original_training_mode:
+            agent.model.eval()
             
         if self.config.detailed_logging:
             print(f"\n=== SINGLE-EPISODE INFERENCE SIMULATION ===")
@@ -146,11 +151,11 @@ class PPOVerifier:
         single_start_features = starting_features_batched[test_episode_idx]
         single_post_features = post_features_batched[test_episode_idx]
         single_action_edges = action_edges_batched[test_episode_idx]
-        
+    
         if self.config.detailed_logging:
             print(f"Testing episode {test_episode_idx}:")
             print(f"  Input shapes - start: {single_start_features.shape}, post: {single_post_features.shape}, edges: {single_action_edges.shape}")
-        
+    
         # Simulate what happens during place_armies() inference (get raw logits)
         with torch.no_grad():
             single_placement_logits_raw, _, _ = agent.run_model(
@@ -159,9 +164,8 @@ class PPOVerifier:
                 action=Phase.PLACE_ARMIES
             )
             single_placement_logits_raw = single_placement_logits_raw.squeeze(0)  # Remove batch dimension
-        
-        # Simulate what happens during attack_transfer() inference
-        with torch.no_grad():
+            
+            # Simulate what happens during attack_transfer() inference
             _, single_attack_logits, single_army_logits = agent.run_model(
                 node_features=single_post_features.unsqueeze(0),   # Add batch dimension
                 action_edges=single_action_edges.unsqueeze(0),     # Add batch dimension
@@ -170,33 +174,33 @@ class PPOVerifier:
             single_attack_logits = single_attack_logits.squeeze(0)  # Remove batch dimension
             single_army_logits = single_army_logits.squeeze(0)     # Remove batch dimension
         
-        # Compare with batched outputs for the same episode
-        batch_placement_logits = placement_logits[test_episode_idx]
-        batch_attack_logits = attack_logits[test_episode_idx]
-        batch_army_logits = army_logits[test_episode_idx]
-        
-        if self.config.detailed_logging:
-            print(f"  Single inference shapes - placement: {single_placement_logits_raw.shape}, attack: {single_attack_logits.shape}, army: {single_army_logits.shape}")
-            print(f"  Batch inference shapes - placement: {batch_placement_logits.shape}, attack: {batch_attack_logits.shape}, army: {batch_army_logits.shape}")
-        
-        # Verify identical results with NaN handling
-        placement_diff = self._safe_max_diff(single_placement_logits_raw, batch_placement_logits)
-        attack_diff = self._safe_max_diff(single_attack_logits, batch_attack_logits)
-        army_diff = self._safe_max_diff(single_army_logits, batch_army_logits)
-        
-        if self.config.detailed_logging:
-            print(f"  Max differences - placement: {placement_diff:.6f}, attack: {attack_diff:.6f}, army: {army_diff:.6f}")
-        
-        # Check for NaN/Inf values in placement logits
-        single_has_nan = torch.isnan(single_placement_logits_raw).any() or torch.isinf(single_placement_logits_raw).any()
-        batch_has_nan = torch.isnan(batch_placement_logits).any() or torch.isinf(batch_placement_logits).any()
-        
-        if single_has_nan or batch_has_nan:
-            print(f"  🚨 NaN/Inf detected in placement logits - Single: {single_has_nan}, Batch: {batch_has_nan}")
+            # Compare with batched outputs for the same episode
+            batch_placement_logits = placement_logits[test_episode_idx]
+            batch_attack_logits = attack_logits[test_episode_idx]
+            batch_army_logits = army_logits[test_episode_idx]
+            
             if self.config.detailed_logging:
-                print(f"    Single NaN count: {torch.isnan(single_placement_logits_raw).sum()}")
-                print(f"    Single Inf count: {torch.isinf(single_placement_logits_raw).sum()}")
-                print(f"    Batch NaN count: {torch.isnan(batch_placement_logits).sum()}")
+                print(f"  Single inference shapes - placement: {single_placement_logits_raw.shape}, attack: {single_attack_logits.shape}, army: {single_army_logits.shape}")
+                print(f"  Batch inference shapes - placement: {batch_placement_logits.shape}, attack: {batch_attack_logits.shape}, army: {batch_army_logits.shape}")
+            
+            # Verify identical results with NaN handling
+            placement_diff = self._safe_max_diff(single_placement_logits_raw, batch_placement_logits)
+            attack_diff = self._safe_max_diff(single_attack_logits, batch_attack_logits)
+            army_diff = self._safe_max_diff(single_army_logits, batch_army_logits)
+            
+            if self.config.detailed_logging:
+                print(f"  Max differences - placement: {placement_diff:.6f}, attack: {attack_diff:.6f}, army: {army_diff:.6f}")
+            
+            # Check for NaN/Inf values in placement logits
+            single_has_nan = torch.isnan(single_placement_logits_raw).any() or torch.isinf(single_placement_logits_raw).any()
+            batch_has_nan = torch.isnan(batch_placement_logits).any() or torch.isinf(batch_placement_logits).any()
+            
+            if single_has_nan or batch_has_nan:
+                print(f"  🚨 NaN/Inf detected in placement logits - Single: {single_has_nan}, Batch: {batch_has_nan}")
+                if self.config.detailed_logging:
+                    print(f"    Single NaN count: {torch.isnan(single_placement_logits_raw).sum()}")
+                    print(f"    Single Inf count: {torch.isinf(single_placement_logits_raw).sum()}")
+                    print(f"    Batch NaN count: {torch.isnan(batch_placement_logits).sum()}")
                 print(f"    Batch Inf count: {torch.isinf(batch_placement_logits).sum()}")
         
         # These should be identical (or very close due to floating point precision)
@@ -290,6 +294,10 @@ class PPOVerifier:
         else:
             print(f"  ✗ Differences detected between single and batch inference")
             print(f"    This indicates the inputs or model state differ between inference and PPO update")
+            
+        # Restore original training mode
+        if original_training_mode:
+            agent.model.train()
     
     def verify_buffer_data_integrity(self, starting_features_batched, post_features_batched, action_edges_batched, epoch):
         """
@@ -339,12 +347,21 @@ class PPOVerifier:
             if torch.isinf(single_post_features).any():
                 print(f"  ERROR: Inf found in episode {episode_idx} post features!")
             
-            # Verify action edges are valid indices
-            if (single_action_edges < 0).any() or (single_action_edges >= single_start_features.size(0)).any():
-                print(f"  ERROR: Invalid action edge indices in episode {episode_idx}!")
-                if self.config.detailed_logging:
-                    print(f"    Edge range: [{single_action_edges.min()}, {single_action_edges.max()}]")
-                    print(f"    Valid range: [0, {single_start_features.size(0) - 1}]")
+            # Verify action edges are valid indices (excluding padded -1,-1 edges)
+            valid_edge_mask = (single_action_edges[:, 0] >= 0) & (single_action_edges[:, 1] >= 0)
+            valid_edges = single_action_edges[valid_edge_mask]
+            
+            if valid_edges.numel() > 0:  # Only check if there are valid (non-padded) edges
+                if (valid_edges >= single_start_features.size(0)).any():
+                    print(f"  ERROR: Invalid action edge indices in episode {episode_idx}!")
+                    if self.config.detailed_logging:
+                        print(f"    Valid edge range: [{valid_edges.min()}, {valid_edges.max()}]")
+                        print(f"    Node count: {single_start_features.size(0)} (valid range: [0, {single_start_features.size(0) - 1}])")
+                        print(f"    Padded edges are expected and normal (marked with -1,-1)")
+                elif self.config.detailed_logging:
+                    print(f"    Action edges: {valid_edges.size(0)} valid, {(~valid_edge_mask).sum()} padded (-1,-1)")
+            elif self.config.detailed_logging:
+                print(f"    All action edges are padded (-1,-1) - this is normal for early game states")
             
             if self.config.detailed_logging:
                 print(f"  ✓ Episode {episode_idx} data integrity verified")
@@ -716,7 +733,6 @@ class PPOVerifier:
         # 5. Verify value head consistency by recomputing
         model_training_mode = agent.model.training
         if model_training_mode:
-            print(f"⚠️  WARNING: Model is in training mode during verification - this can cause recomputation differences!")
             agent.model.eval()  # Temporarily set to eval mode for consistent results
         
         with torch.no_grad():
