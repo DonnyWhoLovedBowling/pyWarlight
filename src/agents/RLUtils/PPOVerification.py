@@ -787,7 +787,7 @@ class PPOVerifier:
             print(f"\n=== GAE COMPUTATION VERIFICATION ===")
             print(f"Rewards shape: {rewards.shape}, range: [{rewards.min():.4f}, {rewards.max():.4f}]")
             print(f"Values shape: {old_values.shape}, range: [{old_values.min():.4f}, {old_values.max():.4f}]")
-            print(f"Last value: {last_value:.4f}")
+            print(f"Last value: {last_value.item():.4f}")
             print(f"Gamma: {gamma}, Lambda: {lam}")
         
         # Manual GAE computation for verification

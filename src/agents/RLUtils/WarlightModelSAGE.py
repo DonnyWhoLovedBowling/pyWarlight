@@ -9,7 +9,7 @@ class StableSAGEConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.sage = SAGEConv(in_channels, out_channels, normalize=True)
-        self.norm = nn.BatchNorm1d(out_channels)
+        self.norm = nn.LayerNorm(out_channels)  # LayerNorm works better for single samples
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, edge_index):
@@ -31,7 +31,7 @@ class WarlightPolicyNetSAGE(nn.Module):
         # Smaller, more stable heads
         self.placement_head = nn.Sequential(
             nn.Linear(embed_dim, 32),
-            nn.BatchNorm1d(32),
+            nn.LayerNorm(32),  # LayerNorm for single sample compatibility
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(32, 1)
@@ -40,7 +40,7 @@ class WarlightPolicyNetSAGE(nn.Module):
         # Simplified attack head
         self.edge_scorer = nn.Sequential(
             nn.Linear(2 * embed_dim, 64),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),  # LayerNorm for single sample compatibility
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 1)
@@ -48,7 +48,7 @@ class WarlightPolicyNetSAGE(nn.Module):
         
         self.army_scorer = nn.Sequential(
             nn.Linear(2 * embed_dim, 64),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),  # LayerNorm for single sample compatibility
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, max_army_send)
@@ -57,7 +57,7 @@ class WarlightPolicyNetSAGE(nn.Module):
         # Much smaller value head
         self.value_head = nn.Sequential(
             nn.Linear(embed_dim, 16),
-            nn.BatchNorm1d(16),
+            nn.LayerNorm(16),  # LayerNorm works better than BatchNorm for single samples
             nn.ReLU(),
             nn.Dropout(0.3),  # High dropout for value stability
             nn.Linear(16, 1)
@@ -84,6 +84,10 @@ class WarlightPolicyNetSAGE(nn.Module):
             graph_embedding = node_embeddings.mean(dim=0)
         else:
             graph_embedding = node_embeddings.mean(dim=1)
+        
+        # Ensure graph_embedding is 2D for BatchNorm1d
+        if graph_embedding.dim() == 1:
+            graph_embedding = graph_embedding.unsqueeze(0)
         
         value = self.value_head(graph_embedding)
         # Tight value clipping for stability
