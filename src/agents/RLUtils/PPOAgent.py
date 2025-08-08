@@ -525,7 +525,7 @@ class PPOAgent:
             # Break early if we've done enough epochs (for adaptive case)
             if self.adaptive_epochs and epoch >= self.current_adaptive_epochs - 1:
                 break
-            if os.path.exists("res/model/") and agent.game_number % 100 == 0:
+            if os.path.exists("res/model/") and agent.game_number % 500 == 0:
                 ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 torch.save(
                     {

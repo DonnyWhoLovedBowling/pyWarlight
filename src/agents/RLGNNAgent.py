@@ -50,7 +50,7 @@ class RLGNNAgent(AgentBase):
     device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
     
     # Use factory to create model based on config
-    config = ConfigFactory.create('reduced_army_send')  # Use reduced army send configuration
+    config = ConfigFactory.create('sage_model')  # Use reduced army send configuration
     model = ModelFactory.create_model(
         model_type=config.model.model_type,
         node_feat_dim=config.model.in_channels,
@@ -718,7 +718,7 @@ class RLGNNAgent(AgentBase):
             # 1️⃣ Region control
             gained_regions = len(curr_regions.difference(prev_regions))
             lost_regions = len(prev_regions.difference(curr_regions))
-            region_reward = gained_regions * 0.5 - lost_regions * 0.0125
+            region_reward = gained_regions * 0.025 - lost_regions * 0.0125
 
             reward += region_reward
 
@@ -764,8 +764,9 @@ class RLGNNAgent(AgentBase):
         reward += action_reward
 
         # 5️⃣ Long-game penalty
-        long_game_reward -= 0.02
-        reward += long_game_reward
+        if game.round > 100:
+            long_game_reward -= 0.01
+            reward += long_game_reward
 
         if game.is_done():
             # Final win/loss reward
@@ -780,7 +781,7 @@ class RLGNNAgent(AgentBase):
         my_regions = game.regions_owned_by(self.agent_number)
         passivity_reward = 0
         if len(my_regions) > 0:
-            passivity_reward = (curr_armies - armies_used - len(my_regions))/(curr_armies+len(my_regions)) * -0.01
+            passivity_reward = (curr_armies - armies_used - len(my_regions))/(curr_armies+len(my_regions)) * -0.003
 
         transfer_reward = 0
         for src_id, tgt_id in transfers:
@@ -790,7 +791,7 @@ class RLGNNAgent(AgentBase):
             prox_before = game.proximity_to_nearest_enemy(src_region)
             prox_after = game.proximity_to_nearest_enemy(tgt_region)
             if prox_after is not None and prox_before is not None:
-                transfer_reward += (prox_before - prox_after) *  math.exp(-0.3 * prox_before) * 0.02  # Reward for moving closer to enemy
+                transfer_reward += (prox_before - prox_after) *  math.exp(-0.3 * prox_before) * 0.015  # Reward for moving closer to enemy
         reward += passivity_reward
         reward += transfer_reward
         placement_rewards = 0
@@ -802,7 +803,7 @@ class RLGNNAgent(AgentBase):
                 good_placements += 1 if any(
                     [n for n in p.region.get_neighbours() if game.get_owner(n) != self.agent_number]) else 0
 
-            placement_rewards += ((good_placements * 0.1 - (len(placements) - good_placements) * 0.05) /
+            placement_rewards += ((good_placements * 0.05 - (len(placements) - good_placements) * 0.025) /
                                   len(my_regions))
 
         reward += placement_rewards
@@ -833,7 +834,7 @@ class RLGNNAgent(AgentBase):
         for tgt, srcs in attack_targets.items():
             if len(srcs) > 1:
                 # Reward for each region attacked from multiple sources
-                multi_side_attack_reward += 0.05 * (len(srcs) - 1)  # Tune as needed
+                multi_side_attack_reward += 0.1 * (len(srcs) - 1)  # Tune as needed
 
         reward += multi_side_attack_reward
 
