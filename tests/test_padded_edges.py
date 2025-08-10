@@ -7,7 +7,7 @@ def test_padded_edges():
     model = WarlightPolicyNet(
         node_feat_dim=8,
         embed_dim=64,
-        max_army_send=42
+        n_army_options=4
     )
     model.eval()
     

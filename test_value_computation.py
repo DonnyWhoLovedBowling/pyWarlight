@@ -150,7 +150,7 @@ def test_value_computation():
     for i in range(batch_size):
         # Simple dummy episode
         action_edges = torch.zeros(42, 2, dtype=torch.long)
-        attacks = torch.tensor([[-1, -1, -1]])  # No attacks
+        attacks = torch.tensor([[-1, -1, -1, -1]])  # No attacks
         placements = torch.tensor([0, 1, 2])  # Place on first 3 regions
         placement_log_probs = torch.tensor([-1.0, -1.2, -1.1])
         attack_log_probs = torch.tensor([0.0])  # Dummy

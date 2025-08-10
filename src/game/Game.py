@@ -45,6 +45,7 @@ class \
     proximity_map: dict[int] = field(default_factory=dict)
     place_armies_features: list[list[int]] = field(default_factory=lambda: [])
     attack_transfer_features: list[list[int]] = field(default_factory=lambda: [])
+    end_features: list[list[int]] = field(default_factory=lambda: [])
     action_edges: list[list[int]] = field(default_factory=lambda: [])   
     
     def __post_init__(self):
@@ -467,14 +468,14 @@ class \
         all_armies = sum(self.armies)
         for r in self.world.regions:
             own_armies = self.get_armies(r)
-            x_list = [0] * (self.config.num_players + 6)
+            x_list = [0] * (self.config.num_players + 5)
             owner = self.get_owner(r)
             if owner == -1:
                 owner_ix = 2
             else:
                 owner_ix = owner - 1
             x_list[owner_ix] = 1
-            x_list[-5] = own_armies/all_armies
+            x_list[-4] = own_armies/all_armies
             allied_armies = 0
             enemy_armies = 0
             for n in r.get_neighbours():
@@ -483,12 +484,13 @@ class \
                 else:
                     allied_armies += self.get_armies(n)
 
-            x_list[-4] = self.proximity_to_nearest_enemy(r)
-            x_list[-3] = enemy_armies/sum(self.armies)
-            x_list[-2] = allied_armies/sum(self.armies)
-            x_list[-1] = own_armies
+            x_list[-3] = self.proximity_to_nearest_enemy(r)
+            x_list[-2] = enemy_armies/sum(self.armies)
+            x_list[-1] = allied_armies/sum(self.armies)
             graph.append(x_list)
-        if self.phase in [Phase.ATTACK_TRANSFER, Phase.END_MOVE]:
+        if self.phase == Phase.END_MOVE:
+            self.end_features = graph
+        if self.phase == Phase.ATTACK_TRANSFER:
             self.attack_transfer_features = graph
         elif self.phase == Phase.PLACE_ARMIES:       
             self.place_armies_features = graph

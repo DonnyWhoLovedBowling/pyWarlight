@@ -21,7 +21,7 @@ def test_log_prob_consistency():
     num_nodes = 6
     max_attacks = 3
     max_placements = 4
-    max_army_send = 5
+    n_army_options = 4
     embed_dim = 64
     
     print("1. SETUP TEST DATA")
@@ -40,7 +40,7 @@ def test_log_prob_consistency():
     action_edges[1, 1] = torch.tensor([4, 5])  # Node 4 -> Node 5
     
     # Create a simple model
-    model = WarlightPolicyNet(8, embed_dim)
+    model = WarlightPolicyNet(8, embed_dim, n_army_options)
     
     # Set up the edge tensor that the model expects
     edge_list = []

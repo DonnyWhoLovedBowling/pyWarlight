@@ -52,7 +52,7 @@ class StabilizedTerritoryGNN(nn.Module):
 
 class StabilizedAttackHead(nn.Module):
     """Attack head with gradient clipping and normalization"""
-    def __init__(self, embed_dim, hidden_dim, max_army_send):
+    def __init__(self, embed_dim, hidden_dim, n_army_options=4):
         super().__init__()
         self.edge_scorer = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
@@ -72,62 +72,71 @@ class StabilizedAttackHead(nn.Module):
             nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Linear(64, max_army_send)
+            nn.Linear(64, n_army_options)
         )
-        self.max_army_send = max_army_send
+        self.n_army_options = n_army_options
+        self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
 
-    def forward(self, node_embeddings: torch.Tensor, action_edges: torch.Tensor, army_counts: torch.Tensor):
-        """Forward pass with improved numerical stability"""
-        # Same logic as original but with normalization layers
+    def forward(self, node_embeddings: torch.Tensor, action_edges: torch.Tensor):
+        """
+        Forward pass for the attack head, handling both single samples and batched samples.
+
+        Args:
+            node_embeddings: Node embeddings from GNN
+                - Single sample: [num_nodes, embed_dim]
+                - Batched: [batch_size, num_nodes, embed_dim]
+            action_edges: Edge indices for possible actions
+                - Single sample: [num_edges, 2]
+                - Batched: [batch_size, num_edges, 2]
+
+        Returns:
+            tuple containing:
+                - edge_logits: Logits for edge selection (same batch structure as input)
+                - army_logits: Logits for army percentage selection (same batch structure as input)
+        """
+        # Handle both single samples and batched samples
         if node_embeddings.dim() == 2:
+            # Single sample: [num_nodes, embed_dim]
             batch_size = 1
             num_nodes, embed_dim = node_embeddings.shape
-            node_embeddings = node_embeddings.unsqueeze(0)
-            army_counts = army_counts.unsqueeze(0)
-            action_edges = action_edges.unsqueeze(0)
+            node_embeddings = node_embeddings.unsqueeze(0)  # [1, num_nodes, embed_dim]
+            action_edges = action_edges.unsqueeze(0)  # [1, num_edges, 2]
             squeeze_output = True
         else:
+            # Batched samples: [batch_size, num_nodes, embed_dim]
             batch_size, num_nodes, embed_dim = node_embeddings.shape
             squeeze_output = False
 
         num_edges = action_edges.shape[-2]
-        src = action_edges[..., 0].to(node_embeddings.device)
-        tgt = action_edges[..., 1].to(node_embeddings.device)
+
+        # Extract source and target indices
+        src = action_edges[..., 0].to(node_embeddings.device)  # [batch_size, num_edges]
+        tgt = action_edges[..., 1].to(node_embeddings.device)  # [batch_size, num_edges]
+
+        # Handle padded elements (-1) by clamping to valid indices
         src_clamped = torch.clamp(src, min=0, max=num_nodes - 1)
         tgt_clamped = torch.clamp(tgt, min=0, max=num_nodes - 1)
 
+        # Gather node embeddings for source and target nodes
         src_embed = torch.gather(node_embeddings, 1,
                                 src_clamped.unsqueeze(-1).expand(-1, -1, embed_dim))
         tgt_embed = torch.gather(node_embeddings, 1,
                                 tgt_clamped.unsqueeze(-1).expand(-1, -1, embed_dim))
+
+        # Concatenate source and target embeddings
         edge_embed = torch.cat([src_embed, tgt_embed], dim=-1)
         edge_embed_flat = edge_embed.view(-1, edge_embed.shape[-1])
 
         # Apply gradient clipping to embeddings
         edge_embed_flat = torch.clamp(edge_embed_flat, min=-10.0, max=10.0)
 
+        # Compute edge and army logits
         edge_logits_flat = self.edge_scorer(edge_embed_flat).squeeze(-1)
         army_logits_flat = self.army_scorer(edge_embed_flat)
 
+        # Reshape to batch format
         edge_logits = edge_logits_flat.view(batch_size, num_edges)
-        army_logits = army_logits_flat.view(batch_size, num_edges, self.max_army_send)
-
-        # Apply soft penalties (same logic as original)
-        src_armies = torch.gather(army_counts, 1, src_clamped)
-        tgt_armies = torch.gather(army_counts, 1, tgt_clamped)
-        valid_edges = (src >= 0) & (tgt >= 0)
-        bad_edges = valid_edges & ((src_armies <= 2) | (tgt_armies >= 3 * src_armies))
-        edge_logits = edge_logits - bad_edges.float() * 1.0
-        
-        invalid_self = (src == tgt)
-        invalid_self_valid = invalid_self & valid_edges
-        edge_logits = edge_logits - invalid_self_valid.float() * 100.0
-
-        # Apply army masking
-        max_sendable = src_armies - 1
-        army_mask = torch.arange(self.max_army_send, device=army_logits.device).unsqueeze(0).unsqueeze(0)
-        valid_mask = army_mask <= max_sendable.unsqueeze(-1)
-        army_logits[~valid_mask] = -1e9
+        army_logits = army_logits_flat.view(batch_size, num_edges, self.n_army_options)
 
         # Clip logits to prevent explosion
         edge_logits = torch.clamp(edge_logits, min=-20.0, max=20.0)
@@ -141,7 +150,7 @@ class StabilizedAttackHead(nn.Module):
 
 class WarlightPolicyNetResidual(nn.Module):
     """Warlight policy network with residual connections and stabilization"""
-    def __init__(self, node_feat_dim, embed_dim=64, max_army_send=50):
+    def __init__(self, node_feat_dim, embed_dim=64, n_army_options=4):
         super().__init__()
         self.gnn = StabilizedTerritoryGNN(node_feat_dim, embed_dim, num_layers=3)
 
@@ -156,7 +165,7 @@ class WarlightPolicyNetResidual(nn.Module):
             nn.Linear(32, 1)
         )
 
-        self.attack_head = StabilizedAttackHead(embed_dim, 64, max_army_send)
+        self.attack_head = StabilizedAttackHead(embed_dim, 64, n_army_options)
 
         # Stabilized value head with smaller network
         self.value_head = nn.Sequential(
@@ -188,7 +197,7 @@ class WarlightPolicyNetResidual(nn.Module):
         value = torch.clamp(value, min=-100.0, max=100.0)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, army_counts, action: str=None, edge_mask=None):
+    def forward(self, x, action_edges, action: str=None, edge_mask=None):
         edge_index = self.edge_tensor.to(x.device)
         node_embeddings = self.gnn(x, edge_index)
         
@@ -202,7 +211,7 @@ class WarlightPolicyNetResidual(nn.Module):
             placement_logits = torch.clamp(placement_logits, min=-20.0, max=20.0)
 
         if action == Phase.ATTACK_TRANSFER or action is None:
-            attack_logits, army_logits = self.attack_head(node_embeddings, action_edges, army_counts)
+            attack_logits, army_logits = self.attack_head(node_embeddings, action_edges)
             
             if edge_mask is not None:
                 attack_logits = attack_logits.masked_fill(~edge_mask, -1e9)

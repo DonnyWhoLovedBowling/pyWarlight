@@ -14,10 +14,11 @@ import os
 @dataclass 
 class ModelConfig:
     """Configuration for the neural network model"""
-    in_channels: int = 8
+    in_channels: int = 7
     hidden_channels: int = 64
     embed_dim: int = 64
-    max_army_send: int = 50
+    max_army_send: int = 50  # Deprecated: kept for backward compatibility
+    n_army_options: int = 4  # Number of army percentage options (25%, 50%, 75%, 100%)
     device: str = 'cpu'  # 'cpu', 'cuda', or 'auto'
     
     # Model architecture selection
@@ -54,7 +55,7 @@ class PPOConfig:
     entropy_coeff_start: float = 0.5       # Initial entropy coefficient
     entropy_coeff_decay: float = 0.3       # Entropy decay over training
     entropy_decay_episodes: int = 15000    # Episodes over which to decay entropy
-    placement_entropy_coeff: float = 0.1   # Placement entropy coefficient
+    placement_entropy_coeff: float = 0.9   # Placement entropy coefficient
     edge_entropy_coeff: float = 0.1        # Edge entropy coefficient  
     army_entropy_coeff: float = 0.003      # Army entropy coefficient
     
@@ -427,7 +428,7 @@ class ConfigFactory:
             "sage_model": get_sage_model_config,
             "transformer_model": get_transformer_model_config,
             "residual_low_entropy": get_residual_low_entropy_config,
-            "reduced_army_send": get_reduced_army_send_config,
+            "residual_percentage": get_residual_percentage_config,
         }
         
         if config_name not in configs:
@@ -458,7 +459,7 @@ class ConfigFactory:
     @staticmethod
     def list_available() -> list[str]:
         """List all available pre-defined configurations"""
-        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send"]
+        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage"]
 
 
 def get_residual_model_config() -> TrainingConfig:
@@ -529,9 +530,9 @@ def get_residual_low_entropy_config() -> TrainingConfig:
     config.ppo.army_entropy_coeff = 0.05  # High army entropy weight
     
     # Verification
-    config.verification.enabled = True
+    config.verification.enabled = False
     config.verification.gradient_norm_threshold = 1000.0
-    config.verification.detailed_logging = True
+    config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
     
     # Logging
@@ -540,6 +541,44 @@ def get_residual_low_entropy_config() -> TrainingConfig:
     
     return config
 
+def get_residual_low_entropy_config() -> TrainingConfig:
+    """Configuration for residual model with very aggressive entropy reduction"""
+    config = TrainingConfig()
+    
+    # Model settings
+    config.model.model_type = "residual"
+    config.model.embed_dim = 64
+    
+    # PPO settings optimized for residual networks
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 1.0
+    config.ppo.value_loss_coeff = 0.5
+    config.ppo.value_clip_range = 0.3
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # Very aggressive entropy schedule for maximum decisiveness
+    config.ppo.entropy_coeff_start = 0.2  # Start very high
+    config.ppo.entropy_coeff_decay = 0.1  # Decay to near zero (90% reduction)
+    config.ppo.entropy_decay_episodes = 10000  # Very fast decay (2000 episodes)
+    config.ppo.placement_entropy_coeff = 0.5  # Very high placement entropy weight
+    config.ppo.edge_entropy_coeff = 0.8  # Very high edge entropy weight
+    config.ppo.army_entropy_coeff = 0.05  # High army entropy weight
+    
+    # Verification
+    config.verification.enabled = False
+    config.verification.gradient_norm_threshold = 1000.0
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    
+    # Logging
+    config.logging.experiment_name = "residual_model_ultra_decisive"
+    config.logging.log_frequency = 50
+    
+    return config
 
 def get_sage_model_config() -> TrainingConfig:
     """Configuration optimized for GraphSAGE model architecture"""
@@ -571,6 +610,7 @@ def get_sage_model_config() -> TrainingConfig:
     config.logging.log_frequency = 50
     
     return config
+
 
 
 def get_transformer_model_config() -> TrainingConfig:
@@ -605,14 +645,15 @@ def get_transformer_model_config() -> TrainingConfig:
     return config
 
 
-def get_reduced_army_send_config() -> TrainingConfig:
-    """Configuration with reduced max_army_send for lower army entropy"""
+def get_reduced_army_options_config() -> TrainingConfig:
+    """Configuration with reduced army options for lower army entropy"""
     config = TrainingConfig()
     
-    # Model settings with reduced army send
+    # Model settings with reduced army options
     config.model.model_type = "residual"  # Use stable residual model
     config.model.embed_dim = 64
-    config.model.max_army_send = 15  # Reduced from 50 to 15 for lower entropy
+    config.model.n_army_options = 3  # Reduced from 4 to 3 options (33%, 66%, 100%)
+    config.model.max_army_send = 15  # Kept for backward compatibility
     
     # PPO settings optimized for reduced action space
     config.ppo.learning_rate = 1e-4
@@ -641,6 +682,56 @@ def get_reduced_army_send_config() -> TrainingConfig:
     
     # Logging
     config.logging.experiment_name = "reduced_army_send_15"
+    config.logging.log_frequency = 50
+    
+    return config
+
+
+def get_residual_percentage_config() -> TrainingConfig:
+    """Configuration for residual model with 4 army percentage options"""
+    config = TrainingConfig()
+    
+    # Model settings with percentage-based army selection
+    config.model.model_type = "residual"  # Use stable residual model
+    config.model.embed_dim = 64
+    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
+    config.model.max_army_send = 50  # Kept for backward compatibility
+    
+    # PPO settings optimized for percentage-based system
+    config.ppo.learning_rate = 1e-4  # Higher LR for residual model stability
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # Entropy coefficients tuned for 4 army options
+    config.ppo.entropy_coeff_start = 0.6
+    config.ppo.entropy_coeff_decay = 0.95
+    config.ppo.entropy_decay_episodes = 8000
+    config.ppo.placement_entropy_coeff = 0.2
+    config.ppo.edge_entropy_coeff = 0.3
+    config.ppo.army_entropy_coeff = 0.15  # Balanced for 4 options
+    
+    # Value and advantage settings
+    config.ppo.value_loss_coeff = 0.2  # Higher due to residual stability
+    config.ppo.max_grad_norm = 1.0
+    config.ppo.adaptive_epochs = True
+    config.ppo.kl_threshold = 0.02
+    
+    # Early stopping
+    config.ppo.early_stopping_enabled = True
+    config.ppo.patience = 3
+    config.ppo.min_improvement = 0.01
+    
+    # Verification
+    config.verification.enabled = True
+    config.verification.gradient_norm_threshold = 1000.0
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    
+    # Logging
+    config.logging.experiment_name = "residual_percentage_4options"
     config.logging.log_frequency = 50
     
     return config

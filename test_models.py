@@ -30,7 +30,7 @@ def test_model_creation():
                 model_type=model_type,
                 node_feat_dim=8,
                 embed_dim=64,
-                max_army_send=50
+                n_army_options=4
             )
             
             # Count parameters

@@ -1,3 +1,4 @@
+from email.policy import default
 import logging
 import random
 import time
@@ -44,19 +45,14 @@ do_hm_search = True
 
 @dataclass
 class RLGNNAgent(AgentBase):
-    in_channels = 8
+    in_channels = 7
     hidden_channels = 64
     batch_size = 24  # Restored - root cause was edge masking inconsistency, not model drift
     device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
     
     # Use factory to create model based on config
-    config = ConfigFactory.create('sage_model')  # Use reduced army send configuration
-    model = ModelFactory.create_model(
-        model_type=config.model.model_type,
-        node_feat_dim=config.model.in_channels,
-        embed_dim=config.model.embed_dim,
-        max_army_send=config.model.max_army_send
-    ).to(device)
+    config = ConfigFactory.create('residual_low_entropy')  # Use aggressive entropy reduction for over-exploration fix
+    model = ModelFactory.create_model(config).to(device)
 
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
@@ -137,7 +133,7 @@ class RLGNNAgent(AgentBase):
                 model_type=config.model.model_type,
                 node_feat_dim=config.model.in_channels,
                 embed_dim=config.model.embed_dim,
-                max_army_send=config.model.max_army_send
+                n_army_options=getattr(config.model, 'n_army_options', 4)
             ).to(self.device)
             
             # Replace the model
@@ -245,7 +241,6 @@ class RLGNNAgent(AgentBase):
                 self._store_single_inference_data(node_features, action_edges, action)
             
             # Single sample case - original logic
-            army_counts = node_features[:, -1].to(dtype=torch.float, device=self.device)
             graph = node_features.to(dtype=torch.float, device=self.device)
 
             if action_edges.numel() == 0 and action == Phase.ATTACK_TRANSFER:
@@ -256,7 +251,7 @@ class RLGNNAgent(AgentBase):
                 edge_mask = (action_edges[:, 0] >= 0) & (action_edges[:, 1] >= 0)
                 
                 # Run model with padded edges - keep outputs at full size for consistency
-                return self.model(graph, action_edges, army_counts, action, edge_mask)
+                return self.model(graph, action_edges, action, edge_mask)
 
     def _store_single_inference_data(self, node_features: torch.Tensor, action_edges: torch.Tensor, action: str):
         """Store input data from single-sample inference for later verification against batch inputs"""
@@ -385,7 +380,6 @@ class RLGNNAgent(AgentBase):
         placement_logits, attack_logits, army_logits = self.model(
             node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
             action_edges,  # [batch_size, 42, 2] (with padding)
-            node_features[:, :, -1].to(dtype=torch.float, device=device),  # [batch_size, num_nodes]
             action,
             valid_edge_masks
             # Pass mask to model to ignore padded edges
@@ -422,15 +416,15 @@ class RLGNNAgent(AgentBase):
                 padded_attack.append(padded)
             attack_logits = torch.stack(padded_attack)  # [batch_size, 42]
 
-            # Pad army logits to [42, max_army_send]
-            max_army_send = max(arl.size(1) if arl.numel() > 0 else 0 for arl in army_logits_list)
-            if max_army_send == 0:
-                max_army_send = self.config.model.max_army_send  # Use config value instead of hardcoded 50
+            # Pad army logits to [42, n_army_options]
+            n_army_options = max(arl.size(1) if arl.numel() > 0 else 0 for arl in army_logits_list)
+            if n_army_options == 0:
+                n_army_options = getattr(self.config.model, 'n_army_options', 4)  # Use config value instead of hardcoded 50
 
             padded_army = []
             for arl in army_logits_list:
                 if arl.numel() == 0:
-                    padded = torch.full((42, max_army_send), -1e9)
+                    padded = torch.full((42, n_army_options), -1e9)
                 else:
                     # Pad edges dimension to 42
                     edge_padding_needed = 42 - arl.size(0)
@@ -440,15 +434,15 @@ class RLGNNAgent(AgentBase):
                     else:
                         arl_edge_padded = arl[:42]  # Truncate if too long
 
-                    # Pad army dimension to max_army_send
-                    army_padding_needed = max_army_send - arl_edge_padded.size(1)
+                    # Pad army dimension to n_army_options
+                    army_padding_needed = n_army_options - arl_edge_padded.size(1)
                     if army_padding_needed > 0:
                         army_padding = torch.full((42, army_padding_needed), -1e9)
                         padded = torch.cat([arl_edge_padded, army_padding], dim=1)
                     else:
-                        padded = arl_edge_padded[:, :max_army_send]
+                        padded = arl_edge_padded[:, :n_army_options]
                 padded_army.append(padded)
-            army_logits = torch.stack(padded_army)  # [batch_size, 42, max_army_send]
+            army_logits = torch.stack(padded_army)  # [batch_size, 42, n_army_options]
         else:
             attack_logits = torch.tensor([])
             army_logits = torch.tensor([])
@@ -593,6 +587,9 @@ class RLGNNAgent(AgentBase):
 
         self.writer.add_scalar('army_entropy_mean', self.ppo_agent.army_entropy_tracker.mean(), self.game_number)
         self.writer.add_scalar('army_entropy_std', self.ppo_agent.army_entropy_tracker.std(), self.game_number)
+
+        self.writer.add_scalar('entropy_loss_mean', self.ppo_agent.army_entropy_tracker.mean(), self.game_number)
+        self.writer.add_scalar('entropy_loss_std', self.ppo_agent.army_entropy_tracker.std(), self.game_number)
 
         self.writer.add_scalar('ratio_mean', self.ppo_agent.ratio_tracker.mean(), self.game_number)
         self.writer.add_scalar('ratio_std', self.ppo_agent.ratio_tracker.std(), self.game_number)
@@ -869,7 +866,7 @@ class RLGNNAgent(AgentBase):
         if object_data:
             ret = [a for a in actions if (isinstance(a, AttackTransfer) and (inc_transfers or a.is_attack()))]
         else:
-            ret = [(a.from_region.get_id(), a.to_region.get_id(), a.armies) for a in actions if
+            ret = [(a.from_region.get_id(), a.to_region.get_id(), a.armies, a.available_armies) for a in actions if
                    (isinstance(a, AttackTransfer) and (inc_transfers or a.is_attack()))]
         return ret
 
@@ -938,25 +935,34 @@ class RLGNNAgent(AgentBase):
             candidate_logits = valid_attack_logits[mask]
 
             probs = f.softmax(candidate_logits, dim=-1)
-            action_index = torch.multinomial(probs, 1).item()
-            tgt = candidate_edges[action_index][1].item()
+            keep_mask = probs > 0.3
+            if keep_mask.any():
+                kept_edges = candidate_edges[keep_mask]
+            else:
+                max_idx = probs.argmax()
+                kept_edges = candidate_edges[max_idx].unsqueeze(0)  # Ensure it's 2D
             
-            # Store the log probability of this edge selection using log_softmax for numerical stability
-            edge_log_prob = f.log_softmax(candidate_logits, dim=-1)[action_index].item()
-            edge_selection_log_probs.append(edge_log_prob)
+            # Compute log probabilities for the kept edges
+            log_probs = f.log_softmax(candidate_logits, dim=-1)
             
-            if src != tgt:
-                ret.append((src.item(), tgt))
-        
+            # Convert each selected edge to individual (src, tgt) tuples and store corresponding log probs
+            for i, edge in enumerate(kept_edges):
+                src_val, tgt_val = edge[0].item(), edge[1].item()
+                if src_val != tgt_val:  # Avoid self-attacks
+                    ret.append((src_val, tgt_val))
+                    # Find the index of this edge in the original candidate list
+                    edge_idx = torch.where((candidate_edges == edge).all(dim=1))[0][0]
+                    edge_selection_log_probs.append(log_probs[edge_idx].item())
+            
         # Store edge selection log probabilities for later use in create_attack_transfers
         self.edge_selection_log_probs = torch.tensor(edge_selection_log_probs) if edge_selection_log_probs else torch.tensor([])
         return ret
 
     def create_attack_transfers(self, game: Game, edges):
         used_armies = defaultdict(int)
+        available_armies = {src: a - 1 for src, a in enumerate(game.armies)}
+         
         ret = []
-        n_attacks = 0
-        n_army_attacks = 0
         actual_attack_log_probs = []
         
         # CONSISTENCY FIX: Only consider valid (non-padded) edges
@@ -964,7 +970,6 @@ class RLGNNAgent(AgentBase):
         
         # Precompute edge log probabilities for efficiency (only for valid edges)
         edge_log_probs = f.log_softmax(self.attack_logits[valid_edge_mask], dim=0)
-        
         for src, tgt in edges:
             # Find the index in the VALID edges
             valid_action_edges = self.action_edges[valid_edge_mask]
@@ -981,20 +986,16 @@ class RLGNNAgent(AgentBase):
             original_indices = valid_edge_mask.nonzero(as_tuple=False).flatten()
             original_idx = original_indices[idx].item()
             
-            available_armies = game.armies[src] - (
-                used_armies[src]
-            )  # leave one behind
-            if available_armies <= 0:
+            if available_armies[src] <= 1:
                 actual_attack_log_probs.append(0.0)  # No attack made
                 continue
 
             # Choose how many armies to send using raw logits (no temperature scaling or noise)
             try:
-                army_logit = self.army_logits[original_idx][:available_armies]
-                army_probs = f.softmax(army_logit, dim=-1)
-                if len(army_logit) == 0:
-                    actual_attack_log_probs.append(0.0)  # No attack made
-                    continue
+                army_probs = f.softmax(self.army_logits[original_idx], dim=-1)
+                # if len(army_logit) == 0:
+                #     actual_attack_log_probs.append(0.0)  # No attack made
+                #     continue
             except IndexError as ie:
                 print(self.army_logits)
                 print(original_idx)
@@ -1002,30 +1003,24 @@ class RLGNNAgent(AgentBase):
                 print(ie)
                 raise ie
             try:
-                k = int(torch.distributions.Categorical(probs=army_probs).sample().int())
+                k = torch.multinomial(army_probs, num_samples=1).item()
             except IndexError as ie:
                 print(army_logit)
                 raise ie
-            if k == 0:
+            used = round((float(k+1)/self.model.attack_head.n_army_options)*(game.armies[src]-1))
+            if used == 0 or used >= available_armies[src]:
                 actual_attack_log_probs.append(0.0)  # No attack made
                 continue
-            used_armies[src] += int(k)
-            if k >= available_armies:
-                actual_attack_log_probs.append(0.0)  # No attack made
-                continue
-
+            available_armies[src] -= int(used)
             # Compute the actual log probability for this attack using raw logits
             edge_log_prob = edge_log_probs[idx].item()
-            army_log_prob = f.log_softmax(army_logit, dim=-1)[k].item()
+            army_log_prob = f.log_softmax(self.army_logits[original_idx], dim=-1)[k].item()
             total_attack_log_prob = edge_log_prob + army_log_prob
             actual_attack_log_probs.append(total_attack_log_prob)
 
             ret.append(
-                AttackTransfer(game.world.regions[src], game.world.regions[tgt], k, None)
+                AttackTransfer(game.world.regions[src], game.world.regions[tgt], used, None, game.armies[src])
             )
-            if game.get_owner(tgt) != self.agent_number:
-                n_attacks += 1
-                n_army_attacks += k
 
         # Store the actual attack log probabilities
         self.actual_attack_log_probs = torch.tensor(actual_attack_log_probs) if actual_attack_log_probs else torch.tensor([])

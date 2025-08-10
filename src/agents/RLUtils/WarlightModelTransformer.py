@@ -92,7 +92,7 @@ class TransformerBlock(nn.Module):
 
 class WarlightPolicyNetTransformer(nn.Module):
     """Transformer-based Warlight policy network"""
-    def __init__(self, node_feat_dim, embed_dim=64, num_heads=4, num_layers=3, max_army_send=50):
+    def __init__(self, node_feat_dim, embed_dim=64, num_heads=4, num_layers=3, n_army_options=4):
         super().__init__()
         
         # Input projection
@@ -129,7 +129,7 @@ class WarlightPolicyNetTransformer(nn.Module):
             nn.Linear(2 * embed_dim, 32),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(32, max_army_send)
+            nn.Linear(32, n_army_options)
         )
         
         # Very small value head for stability
@@ -141,7 +141,8 @@ class WarlightPolicyNetTransformer(nn.Module):
             nn.Linear(16, 1)
         )
         
-        self.max_army_send = max_army_send
+        self.n_army_options = n_army_options
+        self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
         self.edge_tensor: torch.Tensor = None
         
     def create_adjacency_mask(self, batch_size, num_nodes, edge_index, device):
@@ -207,7 +208,7 @@ class WarlightPolicyNetTransformer(nn.Module):
         value = torch.clamp(value, min=-30.0, max=30.0)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, army_counts, action: str=None, edge_mask=None):
+    def forward(self, x, action_edges, action: str=None, edge_mask=None):
         if self.edge_tensor is None:
             edge_tensor = torch.empty((2, 0), dtype=torch.long, device=x.device)
         else:
@@ -264,7 +265,7 @@ class WarlightPolicyNetTransformer(nn.Module):
             army_logits_flat = self.army_scorer(edge_embed_flat)
             
             attack_logits = attack_logits_flat.view(batch_size, num_edges)
-            army_logits = army_logits_flat.view(batch_size, num_edges, self.max_army_send)
+            army_logits = army_logits_flat.view(batch_size, num_edges, self.n_army_options)
             
             # Conservative output clipping
             attack_logits = torch.clamp(attack_logits, min=-10.0, max=10.0)

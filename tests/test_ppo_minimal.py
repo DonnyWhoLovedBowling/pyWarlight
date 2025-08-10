@@ -42,7 +42,7 @@ def test_ppo_log_prob_differences():
     for i in range(batch_size):
         # Sample placement and attack actions
         placement_actions = [0, 1, 2]  # Place armies on nodes 0, 1, 2
-        attack_actions = [[0, 1, 2]]  # Attack from 0 to 1 with 2 armies
+        attack_actions = [[0, 1, 2, 3]]  # Attack from 0 to 1 with 2 armies out of 3 available
         
         # Generate model outputs for this sample
         single_node_features = node_features[i:i+1]

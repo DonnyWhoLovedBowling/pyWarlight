@@ -10,35 +10,36 @@ class ModelFactory:
     """Factory for creating different model architectures optimized for gradient stability"""
     
     @staticmethod
-    def create_model(
-        model_type: ModelType,
-        node_feat_dim: int = 8,
-        embed_dim: int = 64,
-        max_army_send: int = 50
-    ):
-        """
+    def create_model(config):
+        """residual_low_entropy
         Create a model instance based on the specified type.
         
         Args:
-            model_type: Type of model architecture
-            node_feat_dim: Number of input features per node
-            embed_dim: Hidden embedding dimension
-            max_army_send: Maximum armies that can be sent in one attack
+            config: holds all necessary parameters:
+            model_type: Type of model architecture,
+            node_feat_dim: Number of input features per node,
+            embed_dim: Hidden embedding dimension,
+            n_army_options: Number of army percentage options (default 4: 25%, 50%, 75%, 100%)
             
         Returns:
             Model instance
         """
+        model_type=config.model.model_type
+        node_feat_dim=config.model.in_channels
+        embed_dim=config.model.embed_dim
+        n_army_options=getattr(config.model, 'n_army_options', 4)  # Default to 4 if not specified
+
         if model_type == 'standard':
-            return WarlightPolicyNet(node_feat_dim, embed_dim, max_army_send)
+            return WarlightPolicyNet(node_feat_dim, embed_dim, n_army_options)
         
         elif model_type == 'residual':
-            return WarlightPolicyNetResidual(node_feat_dim, embed_dim, max_army_send)
+            return WarlightPolicyNetResidual(node_feat_dim, embed_dim, n_army_options)
         
         elif model_type == 'sage':
-            return WarlightPolicyNetSAGE(node_feat_dim, embed_dim, max_army_send)
+            return WarlightPolicyNetSAGE(node_feat_dim, embed_dim, n_army_options)
         
         elif model_type == 'transformer':
-            return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, max_army_send=max_army_send)
+            return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, n_army_options=n_army_options)
         
         else:
             raise ValueError(f"Unknown model type: {model_type}")

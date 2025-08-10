@@ -293,16 +293,84 @@ def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor, last_value: torch.Tensor, dones: torch.Tensor, gamma=0.95, lam=0.95):
+    """
+    Compute Generalized Advantage Estimation (GAE) for batch of episodes.
+    
+    In PPO, we typically have a batch of episodes, each contributing one reward/value/done per update.
+    This is different from a single episode with multiple timesteps.
+    
+    Args:
+        rewards: [B] - rewards for each episode in batch
+        values: [B] - value estimates for each episode  
+        last_value: [B] or scalar - value estimate for final state of each episode
+        dones: [B] - done flags for each episode
+        gamma: discount factor
+        lam: GAE lambda parameter
+        
+    Returns:
+        advantages: [B] - computed advantages
+        returns: [B] - computed returns (advantages + values)
+    """
     device = values.device
-    advantages = []
-    gae = 0
-    values = torch.cat([values, torch.tensor([last_value], dtype=values.dtype, device=device)])
-    for t in reversed(range(len(rewards))):
-        delta = rewards[t] + gamma * values[t + 1] * (1 - dones[t]) - values[t]
-        gae = delta + gamma * lam * (1 - dones[t]) * gae
-        advantages.insert(0, gae)
-    returns = [adv + val for adv, val in zip(advantages, values[:-1])]
-    return torch.tensor(advantages, device=device), torch.tensor(returns, device=device)
+    
+    # Ensure all inputs are 1D tensors with same length (batch size)
+    if rewards.dim() != 1 or values.dim() != 1 or dones.dim() != 1:
+        raise ValueError(f"Expected 1D tensors for batch processing. Got shapes: rewards={rewards.shape}, values={values.shape}, dones={dones.shape}")
+    
+    batch_size = rewards.size(0)
+    if values.size(0) != batch_size or dones.size(0) != batch_size:
+        raise ValueError(f"Batch size mismatch: rewards={rewards.size(0)}, values={values.size(0)}, dones={dones.size(0)}")
+    
+    # Handle last_value - ensure it matches batch size
+    if isinstance(last_value, (int, float)):
+        last_value = torch.full((batch_size,), last_value, dtype=values.dtype, device=device)
+    elif last_value.dim() == 0:
+        last_value = last_value.unsqueeze(0).expand(batch_size)
+    elif last_value.numel() == 1:
+        last_value = last_value.expand(batch_size)
+    elif last_value.size(0) != batch_size:
+        raise ValueError(f"last_value batch size {last_value.size(0)} doesn't match expected {batch_size}")
+    
+    # For batch of episodes (not sequential timesteps), GAE simplifies to:
+    # delta = reward + gamma * next_value * (1 - done) - current_value
+    # advantage = delta (since there's no temporal sequence within each episode)
+    # return = advantage + current_value
+    
+    # Compute TD error (delta)
+    next_values = last_value  # For episode endings, next value is the terminal value
+    deltas = rewards + gamma * next_values * (1.0 - dones.float()) - values
+    
+    # For single-step episodes, advantages equal deltas
+    advantages = deltas
+    
+    # Returns are advantages + current values
+    returns = advantages + values
+    
+    # Ensure proper dtype and device
+    advantages = advantages.to(dtype=torch.float32, device=device)
+    returns = returns.to(dtype=torch.float32, device=device)
+    
+    # Validate outputs for NaN/inf values
+    if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+        print("🚨 WARNING: NaN/inf detected in advantages computation")
+        print(f"  rewards: {rewards}")
+        print(f"  values: {values}")
+        print(f"  last_value: {last_value}")
+        print(f"  dones: {dones}")
+        print(f"  deltas: {deltas}")
+        print(f"  gamma: {gamma}, lam: {lam}")
+        # Replace problematic values with zeros
+        advantages = torch.where(torch.isnan(advantages) | torch.isinf(advantages), 
+                               torch.zeros_like(advantages), advantages)
+        
+    if torch.isnan(returns).any() or torch.isinf(returns).any():
+        print("🚨 WARNING: NaN/inf detected in returns computation")
+        print(f"  returns before fix: {returns}")
+        returns = torch.where(torch.isnan(returns) | torch.isinf(returns), 
+                            values, returns)  # Fallback to original values
+        print(f"  returns after fix: {returns}")
+    
+    return advantages, returns
 
 
 def compute_entropy(placement_logits, edge_logits, army_logits):
@@ -343,8 +411,9 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
             # Recompute log probs for normalized distribution
             normalized_log_probs = torch.log(torch.clamp(normalized_probs, min=1e-10))
             
-            # Compute entropy: -sum(p * log(p)) over valid regions only
-            placement_entropy = -(normalized_probs * normalized_log_probs).sum()
+            # Compute entropy: -sum(p * log(p)) over spatial dimension, then mean over batch
+            batch_entropy = -(normalized_probs * normalized_log_probs).sum(dim=-1)  # [batch_size]
+            placement_entropy = batch_entropy.mean()  # Average over batch dimension
             
             # Check if entropy computation resulted in NaN
             if torch.isnan(placement_entropy):
@@ -380,7 +449,10 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
             # Use log_softmax for numerical stability
             edge_log_probs = f.log_softmax(edge_logits_safe, dim=-1)
             edge_probs = torch.exp(edge_log_probs)
-            edge_entropy = -(edge_probs * edge_log_probs).sum()
+            
+            # Compute entropy per sample, then mean over batch
+            batch_entropy = -(edge_probs * edge_log_probs).sum(dim=-1)  # [batch_size]
+            edge_entropy = batch_entropy.mean()  # Average over batch dimension
             
             # Check if entropy computation resulted in NaN
             if torch.isnan(edge_entropy):
@@ -390,11 +462,30 @@ def compute_entropy(placement_logits, edge_logits, army_logits):
             logging.error(re)
             edge_entropy = torch.tensor(0.0, device=edge_logits.device)
 
-    army_entropy = torch.zeros(1, device=placement_logits.device)
-    for logits in army_logits:
-        probs = f.softmax(logits, dim=-1)
-        log_probs = f.log_softmax(logits, dim=-1)
-        army_entropy += -(probs * log_probs).sum()
+    if torch.isnan(army_logits).any():
+        army_entropy = torch.tensor(0.0, device=army_logits.device)
+    else:
+        try:
+            # Reshape to [batch_size * num_edges, num_army_options] for categorical distribution
+            batch_size, num_edges, num_army_options = army_logits.shape
+            army_logits_reshaped = army_logits.view(-1, num_army_options)
+            
+            # Create categorical distribution from logits and compute entropy
+            categorical = torch.distributions.Categorical(logits=army_logits_reshaped)
+            entropy_per_edge = categorical.entropy()  # [batch_size * num_edges]
+            
+            # Reshape back to [batch_size, num_edges] and average
+            entropy_per_sample = entropy_per_edge.view(batch_size, num_edges).mean(dim=-1)  # [batch_size]
+            army_entropy = entropy_per_sample.mean()  # Average over batch dimension
+            
+            # Check if entropy computation resulted in NaN
+            if torch.isnan(army_entropy):
+                army_entropy = torch.tensor(0.0, device=army_logits.device)
+                
+        except RuntimeError as re:
+            logging.error(re)
+            army_entropy = torch.tensor(0.0, device=army_logits.device)
+    
     return placement_entropy, edge_entropy, army_entropy
 
 
@@ -424,9 +515,9 @@ def apply_placement_mask(placement_logits, owned_regions_list, num_regions):
 
 
 def compute_individual_log_probs(
-    attacks: torch.Tensor,            # [batch_size, max_attacks, 3] (src, tgt, armies)
+    attacks: torch.Tensor,            # [batch_size, max_attacks, 4] (src, tgt, used_armies, available_armies)
     attack_logits: torch.Tensor,      # [batch_size, 42] - PADDED
-    army_logits: torch.Tensor,        # [batch_size, 42, max_army_send] - PADDED  
+    army_logits: torch.Tensor,        # [batch_size, 42, n_army_options] - PADDED  
     placements: torch.Tensor,         # [batch_size, max_placements]
     placement_logits: torch.Tensor,   # [batch_size, num_nodes]
     action_edges: torch.Tensor        # [batch_size, 42, 2] - PADDED with (-1,-1)
@@ -451,7 +542,7 @@ def compute_individual_log_probs(
         if attack_logits.dim() == 1:
             attack_logits = attack_logits.unsqueeze(0)  # [1, 42]
         if army_logits.dim() == 2:
-            army_logits = army_logits.unsqueeze(0)  # [1, 42, max_army_send]
+            army_logits = army_logits.unsqueeze(0)  # [1, 42, n_army_options]
         if placements.dim() == 1:
             placements = placements.unsqueeze(0)  # [1, max_placements]
         if attacks.dim() == 2:
@@ -538,14 +629,49 @@ def compute_individual_log_probs(
         batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
         edge_lp = edge_log_probs[batch_idx, edge_indices] * valid_match_mask.float()  # [batch_size, max_attacks]
 
-        # Army log-probs
-        army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, max_army_send]
+        # Army log-probs - UPDATED: Handle percentage-based army selection system
+        army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, n_army_options]
         army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
 
-        # Clamp army indices to valid range and only gather for valid attacks
-        # Army count in attacks is 1-indexed, but log probs are 0-indexed, so subtract 1
-        army_indices = (attacks[:, :, 2] - 1).clamp(min=0, max=army_log_probs.size(2) - 1)  # Convert to 0-indexed
-        army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)  # [batch_size, max_attacks]
+        # NEW PERCENTAGE SYSTEM: The army logits represent percentage choices
+        # Choice i (0-indexed) means using (i+1)/n_army_options * 100% of available armies
+        # attacks tensor now contains: [src, tgt, used_armies, available_armies]
+        used_armies = attacks[:, :, 2]  # [batch_size, max_attacks]
+        available_armies = attacks[:, :, 3]  # [batch_size, max_attacks]
+        
+        # IMPORTANT: Multiple logits can map to the same army count!
+        # We need to sum probabilities for all logits that lead to the same army count
+        n_army_options = army_log_probs.size(2)  # Get number of army options from logits shape
+        
+        # Convert log probabilities to probabilities for summing
+        army_probs = torch.exp(army_log_probs)  # [batch_size, max_attacks, n_army_options]
+        
+        # For each attack, calculate which army count each logit choice leads to
+        batch_size, max_attacks, _ = army_probs.shape
+        army_lp_list = []
+        
+        for b in range(batch_size):
+            attack_lps = []
+            for a in range(max_attacks):
+                if valid_match_mask[b, a]:  # Only process valid attacks
+                    used = used_armies[b, a].item()
+                    available = available_armies[b, a].item()
+                    
+                    # Calculate what army count each choice leads to
+                    total_prob = 0.0
+                    for choice_idx in range(n_army_options):
+                        choice_army_count = round((choice_idx + 1) / n_army_options * available)
+                        if choice_army_count == used:
+                            total_prob += army_probs[b, a, choice_idx].item()
+                    
+                    # Convert back to log probability
+                    attack_lp = torch.log(torch.clamp(torch.tensor(total_prob), min=1e-10))
+                    attack_lps.append(attack_lp)
+                else:
+                    attack_lps.append(torch.tensor(0.0))  # Invalid attack
+            army_lp_list.append(torch.stack(attack_lps))
+        
+        army_lp = torch.stack(army_lp_list)  # [batch_size, max_attacks]
 
         # Apply valid mask to army log-probs (zeros out padded attacks)
         army_lp = army_lp * valid_match_mask.float()
@@ -559,103 +685,3 @@ def compute_individual_log_probs(
 
     return placement_log_probs, attack_log_probs
 
-
-def compute_log_probs(
-    attacks: torch.Tensor,            # [batch_size, max_attacks, 3] (src, tgt, armies)
-    attack_logits: torch.Tensor,      # [batch_size, 42] - PADDED
-    army_logits: torch.Tensor,        # [batch_size, 42, max_army_send] - PADDED  
-    placements: torch.Tensor,         # [batch_size, max_placements]
-    placement_logits: torch.Tensor,   # [batch_size, num_nodes]
-    action_edges: torch.Tensor        # [batch_size, 42, 2] - PADDED with (-1,-1)
-) -> torch.Tensor:
-    """
-    Fully vectorized with consistent 42-edge padding across all batches
-    Returns total log probability by summing individual action log probabilities
-    """
-    device = placement_logits.device
-    
-    # Handle non-batch inputs by adding batch dimension
-    if placement_logits.dim() == 1:
-        # Single sample case - convert all inputs to batch format
-        num_nodes = placement_logits.size(0)
-        placement_logits = placement_logits.unsqueeze(0)  # [1, num_nodes]
-        
-        # Handle other tensors that might also be non-batched
-        if attack_logits.dim() == 1:
-            attack_logits = attack_logits.unsqueeze(0)  # [1, 42]
-        if army_logits.dim() == 2:
-            army_logits = army_logits.unsqueeze(0)  # [1, 42, max_army_send]
-        if placements.dim() == 1:
-            placements = placements.unsqueeze(0)  # [1, max_placements]
-        if attacks.dim() == 2:
-            attacks = attacks.unsqueeze(0)  # [1, max_attacks, 3]
-        if action_edges.dim() == 2:
-            action_edges = action_edges.unsqueeze(0)  # [1, 42, 2]
-            
-        batch_size = 1
-        is_single_sample = True
-    else:
-        # Batch case - placement_logits is [batch_size, num_nodes]
-        num_nodes = placement_logits.size(1)
-        batch_size = placement_logits.size(0)
-        is_single_sample = False
-    
-    # --- Placement log-probs (vectorized) ---
-    placement_log_probs = f.log_softmax(placement_logits, dim=-1)
-    placement_mask = placements >= 0
-    placement_log_prob = torch.gather(placement_log_probs, 1, placements.clamp(min=0))
-    placement_log_prob = (placement_log_prob * placement_mask.float()).sum(dim=1)
-    
-
-    # Handle case where there are no attacks
-    if isinstance(attacks, list):
-        has_attacks = len(attacks) > 0
-    else:
-        has_attacks = attacks.numel() > 0
-
-    if not has_attacks:
-        # No attacks case - create empty tensors with proper shapes
-        attack_log_prob = torch.zeros(batch_size, dtype=torch.float, device=device)
-    else:
-        # Create vectorized edge lookup
-        action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, 42]
-
-        attacks_flat = attacks[:, :, 0] * num_nodes + attacks[:, :, 1]  # [batch_size, max_attacks]
-        # Find matching edges using broadcasting
-        edge_matches = (
-                    attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, 42]
-        edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
-
-        # Mask valid attacks and edges
-        attack_mask = (attacks[:, :, 0] >= 0)
-        edge_mask = (action_edges[:, :, 0] >= 0)  # Mask padded (-1,-1) edges
-        valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
-
-        # --- Attack log-probs (fully vectorized) ---
-        edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, 42]
-
-        # Gather edge and army log-probs
-        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
-        edge_lp = edge_log_probs[batch_idx, edge_indices] * valid_match_mask.float()
-
-        # Army log-probs - FIX: Handle negative army values
-        army_logits_selected = army_logits[batch_idx, edge_indices]  # [batch_size, max_attacks, max_army_send]
-        army_log_probs = f.log_softmax(army_logits_selected, dim=-1)
-
-        # Clamp army indices to valid range and only gather for valid attacks
-        army_indices = attacks[:, :, 2].clamp(min=0,
-                                              max=army_log_probs.size(2) - 1)  # Clamp to [0, max_army_send-1]
-        army_lp = torch.gather(army_log_probs, 2, army_indices.unsqueeze(-1)).squeeze(-1)
-
-        # Apply valid mask to army log-probs (zeros out padded attacks)
-        army_lp = army_lp * valid_match_mask.float()
-
-        attack_log_prob = (edge_lp + army_lp).sum(dim=1)
-
-    result = placement_log_prob + attack_log_prob
-
-    # If input was single sample, return scalar instead of batch
-    if is_single_sample:
-        result = result.squeeze(0)
-
-    return result

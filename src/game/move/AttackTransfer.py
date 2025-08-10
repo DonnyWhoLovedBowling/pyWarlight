@@ -9,6 +9,7 @@ class AttackTransfer:
     to_region: Region
     armies: int
     result: FightResult = field(default_factory=FightResult)
+    available_armies: int = -1
 
     def __eq__(self, other):
         return (

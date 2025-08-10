@@ -20,7 +20,7 @@ class StableSAGEConv(nn.Module):
 
 class WarlightPolicyNetSAGE(nn.Module):
     """Warlight policy network using GraphSAGE (more stable than GCN)"""
-    def __init__(self, node_feat_dim, embed_dim=64, max_army_send=50):
+    def __init__(self, node_feat_dim, embed_dim=64, n_army_options=4):
         super().__init__()
         
         # GraphSAGE layers (inherently more stable than GCN)
@@ -51,7 +51,7 @@ class WarlightPolicyNetSAGE(nn.Module):
             nn.LayerNorm(64),  # LayerNorm for single sample compatibility
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(64, max_army_send)
+            nn.Linear(64, n_army_options)
         )
 
         # Much smaller value head
@@ -63,7 +63,8 @@ class WarlightPolicyNetSAGE(nn.Module):
             nn.Linear(16, 1)
         )
         
-        self.max_army_send = max_army_send
+        self.n_army_options = n_army_options
+        self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
         self.edge_tensor: torch.Tensor = None
 
     def get_node_embeddings(self, x, edge_index):
@@ -94,7 +95,7 @@ class WarlightPolicyNetSAGE(nn.Module):
         value = torch.clamp(value, min=-50.0, max=50.0)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, army_counts, action: str=None, edge_mask=None):
+    def forward(self, x, action_edges, action: str=None, edge_mask=None):
         edge_index = self.edge_tensor.to(x.device)
         node_embeddings = self.get_node_embeddings(x, edge_index)
         
@@ -138,7 +139,7 @@ class WarlightPolicyNetSAGE(nn.Module):
             army_logits_flat = self.army_scorer(edge_embed_flat)
             
             attack_logits = attack_logits_flat.view(batch_size, num_edges)
-            army_logits = army_logits_flat.view(batch_size, num_edges, self.max_army_send)
+            army_logits = army_logits_flat.view(batch_size, num_edges, self.n_army_options)
             
             # Clip outputs
             attack_logits = torch.clamp(attack_logits, min=-15.0, max=15.0)

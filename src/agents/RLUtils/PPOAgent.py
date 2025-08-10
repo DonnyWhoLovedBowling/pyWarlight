@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as f
 from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
 from src.game.Phase import Phase
-from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_log_probs, compute_individual_log_probs, load_checkpoint
+from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_individual_log_probs, load_checkpoint
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 from src.config.training_config import VerificationConfig
 from src.agents.RLUtils.RLUtils import apply_placement_masking
@@ -62,6 +62,7 @@ class PPOAgent:
         self.placement_entropy_tracker = StatTracker()
         self.edge_entropy_tracker = StatTracker()
         self.army_entropy_tracker = StatTracker()
+        self.entropy_loss_tracker = StatTracker()
         self.value_tracker = StatTracker()
         self.value_pred_tracker = StatTracker()
         self.returns_tracker = StatTracker()
@@ -213,6 +214,10 @@ class PPOAgent:
         agent.total_rewards['normalized_reward'] = normalized_rewards_tensor.mean().item()
 
         self.adv_tracker.log(advantages.mean().item())
+        
+        # Store original advantages before normalization for verification
+        original_advantages = advantages.clone()
+        
         if agent.game_number > 1:
             std = self.adv_tracker.std()
             advantages = (advantages - self.adv_tracker.mean()) / (std + 1e-6)
@@ -420,11 +425,22 @@ class PPOAgent:
             if torch.isnan(policy_loss).any() or torch.isinf(policy_loss).any():
                 raise RuntimeError(f'policy_loss inf!: {ratio}, {advantages}')
             self.ratio_tracker.log(ratio.mean().item())
-            values_pred = self.policy.get_value(buffer.get_end_features())
+            
+            # Ensure model is in eval mode for consistent value computation
+            model_was_training = self.policy.training
+            if model_was_training:
+                self.policy.eval()
+            
+            with torch.no_grad():
+                values_pred = self.policy.get_value(buffer.get_end_features())
+            
+            # Restore training mode for gradient computation
+            if model_was_training:
+                self.policy.train()
             
             # Optional verification of value computation
             self.verifier.verify_value_computation(
-                agent, buffer.get_end_features(), buffer, values_pred, returns, advantages
+                agent, buffer.get_end_features(), buffer, values_pred, returns, original_advantages
             )
             
             # Value loss with optional clipping for additional regularization
@@ -476,7 +492,7 @@ class PPOAgent:
             entropy_loss = (self.placement_entropy_coeff * placement_entropy + 
                           self.edge_entropy_coeff * edge_entropy + 
                           self.army_entropy_coeff * army_entropy)
-            
+            self.entropy_loss_tracker.log(entropy_loss.item())
             loss = policy_loss + self.value_loss_coeff * value_loss - entropy_factor * entropy_loss
             self.loss_tracker.log(loss.mean().item())
 
