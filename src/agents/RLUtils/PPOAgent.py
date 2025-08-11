@@ -487,6 +487,7 @@ class PPOAgent:
                           self.edge_entropy_coeff * edge_entropy + 
                           self.army_entropy_coeff * army_entropy)
             self.entropy_loss_tracker.log(entropy_loss.item())
+            # Both policy_loss and value_loss should be minimized (i.e., both positive, same sign)
             loss = policy_loss + self.value_loss_coeff * value_loss - entropy_factor * entropy_loss
             self.loss_tracker.log(loss.mean().item())
 

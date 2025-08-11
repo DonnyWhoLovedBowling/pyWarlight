@@ -706,8 +706,8 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.ppo.lam = 0.95
     
     # Entropy coefficients tuned for 4 army options
-    config.ppo.entropy_coeff_start = 0.03
-    config.ppo.entropy_coeff_decay = 0.02
+    config.ppo.entropy_coeff_start = 0.3
+    config.ppo.entropy_coeff_decay = 0.27
     config.ppo.entropy_decay_episodes = 10000
     config.ppo.placement_entropy_coeff = 1
     config.ppo.edge_entropy_coeff = 1

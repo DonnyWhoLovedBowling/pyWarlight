@@ -5,7 +5,7 @@ import time
 import sys
 from builtins import int
 
-if sys.version_info[1] < 11:
+if sys.version_info[1] <= 11:
     from typing_extensions import override
 else:
     from typing import override

@@ -555,7 +555,7 @@ class RLGNNAgent(AgentBase):
                 total_placements += p
             # Check if region has an enemy neighbor
             region = game.world.regions[ix]
-            if any(game.get_owner(n) != self.agent_number for n in region.get_neighbours()):
+            if game.is_enemy_border(region):
                 placements_next_to_enemy += p
         # Add percentage of placements next to enemies to total_rewards
         if total_placements > 0:
@@ -731,7 +731,7 @@ class RLGNNAgent(AgentBase):
             # 1️⃣ Region control
             gained_regions = len(curr_regions.difference(prev_regions))
             lost_regions = len(prev_regions.difference(curr_regions))
-            region_reward = gained_regions * 0.025 - lost_regions * 0.0125
+            region_reward = gained_regions * 0.05 lost_regions * 0.025
 
             reward += region_reward
 
@@ -772,7 +772,7 @@ class RLGNNAgent(AgentBase):
         if len(attacks) > 0:
             eff = destroyed_armies / armies_used
             action_reward = 0.005
-            action_reward += 0.01 * eff
+            action_reward += 0.02 * eff
 
         reward += action_reward
 
@@ -804,7 +804,7 @@ class RLGNNAgent(AgentBase):
             prox_before = game.proximity_to_nearest_enemy(src_region)
             prox_after = game.proximity_to_nearest_enemy(tgt_region)
             if prox_after is not None and prox_before is not None:
-                transfer_reward += (prox_before - prox_after) *  math.exp(-0.3 * prox_before) * 0.015  # Reward for moving closer to enemy
+                transfer_reward += (prox_before - prox_after) *  math.exp(-0.3 * prox_before) * 0.005  # Reward for moving closer to enemy
         reward += passivity_reward
         reward += transfer_reward
         placement_rewards = 0
@@ -816,7 +816,7 @@ class RLGNNAgent(AgentBase):
                 good_placements += 1 if any(
                     [n for n in p.region.get_neighbours() if game.get_owner(n) != self.agent_number]) else 0
 
-            placement_rewards += ((good_placements * 0.05 - (len(placements) - good_placements) * 0.025) /
+            placement_rewards += ((good_placements * 0.02 - (len(placements) - good_placements) * 0.01) /
                                   len(my_regions))
 
         reward += placement_rewards
