@@ -362,7 +362,7 @@ class RLGNNAgent(AgentBase):
 
         Args:
             node_features: [batch_size, num_nodes, features]
-            action_edges: [batch_size, num_edges, 2] (padded to 42 edges)
+            action_edges: [batch_size, num_edges, 2] (padded to 83 edges)
             action: Phase.PLACE_ARMIES or Phase.ATTACK_TRANSFER
         """
         device = node_features.device
@@ -379,7 +379,7 @@ class RLGNNAgent(AgentBase):
         self.model.to(device)
         placement_logits, attack_logits, army_logits = self.model(
             node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
-            action_edges,  # [batch_size, 42, 2] (with padding)
+            action_edges,  # [batch_size, num_edges, 2] (with padding)
             action,
             valid_edge_masks
             # Pass mask to model to ignore padded edges
@@ -401,18 +401,19 @@ class RLGNNAgent(AgentBase):
             placement_logits = torch.tensor([])
 
         if action == Phase.ATTACK_TRANSFER or action is None:
-            # Pad attack logits to 42 edges
+            # Pad attack logits to num_edges edges
             padded_attack = []
+            num_edges = self.model.edge_tensor.numel()
             for al in attack_logits_list:
                 if al.numel() == 0:
-                    padded = torch.full((42,), -1e9)
+                    padded = torch.full((num_edges,), -1e9)
                 else:
-                    padding_needed = 42 - al.size(0)
+                    padding_needed = num_edges - al.size(0)
                     if padding_needed > 0:
                         padding = torch.full((padding_needed,), -1e9)
                         padded = torch.cat([al, padding])
                     else:
-                        padded = al[:42]  # Truncate if too long
+                        padded = al[:num_edges]  # Truncate if too long
                 padded_attack.append(padded)
             attack_logits = torch.stack(padded_attack)  # [batch_size, 42]
 
@@ -424,25 +425,25 @@ class RLGNNAgent(AgentBase):
             padded_army = []
             for arl in army_logits_list:
                 if arl.numel() == 0:
-                    padded = torch.full((42, n_army_options), -1e9)
+                    padded = torch.full((num_edges, n_army_options), -1e9)
                 else:
-                    # Pad edges dimension to 42
-                    edge_padding_needed = 42 - arl.size(0)
+                    # Pad edges dimension to num_edges
+                    edge_padding_needed = num_edges - arl.size(0)
                     if edge_padding_needed > 0:
                         edge_padding = torch.full((edge_padding_needed, arl.size(1)), -1e9)
                         arl_edge_padded = torch.cat([arl, edge_padding], dim=0)
                     else:
-                        arl_edge_padded = arl[:42]  # Truncate if too long
+                        arl_edge_padded = arl[:num_edges]  # Truncate if too long
 
                     # Pad army dimension to n_army_options
                     army_padding_needed = n_army_options - arl_edge_padded.size(1)
                     if army_padding_needed > 0:
-                        army_padding = torch.full((42, army_padding_needed), -1e9)
+                        army_padding = torch.full((num_edges, army_padding_needed), -1e9)
                         padded = torch.cat([arl_edge_padded, army_padding], dim=1)
                     else:
                         padded = arl_edge_padded[:, :n_army_options]
                 padded_army.append(padded)
-            army_logits = torch.stack(padded_army)  # [batch_size, 42, n_army_options]
+            army_logits = torch.stack(padded_army)  # [batch_size, num_edges, n_army_options]
         else:
             attack_logits = torch.tensor([])
             army_logits = torch.tensor([])
@@ -453,22 +454,22 @@ class RLGNNAgent(AgentBase):
     def init_turn(self, game: Game):
         if self.model.edge_tensor is None:
             self.model.edge_tensor = torch.tensor(game.world.torch_edge_list, dtype=torch.long, device=self.device)
-        
+        num_edges = self.model.edge_tensor.numel()
         original_action_edges = torch.tensor(game.create_action_edges(), dtype=torch.long, device=self.device)
-        
-        # CONSISTENCY FIX: Pad/truncate action edges to 42 to match batch inference
-        if original_action_edges.size(0) < 42:
-            padding_needed = 42 - original_action_edges.size(0)
+
+        # CONSISTENCY FIX: Pad/truncate action edges to 83 to match batch inference
+        if original_action_edges.size(0) < num_edges:
+            padding_needed = num_edges - original_action_edges.size(0)
             padding = torch.full((padding_needed, 2), -1, dtype=original_action_edges.dtype, device=original_action_edges.device)
             self.action_edges = torch.cat([original_action_edges, padding], dim=0)
-        elif original_action_edges.size(0) > 42:
-            self.action_edges = original_action_edges[:42]  # Truncate if too long
+        elif original_action_edges.size(0) > num_edges:
+            self.action_edges = original_action_edges[:num_edges]  # Truncate if too long
         else:
             self.action_edges = original_action_edges
             
         # Store the original size for output truncation
-        self.original_num_edges = min(original_action_edges.size(0), 42)
-        
+        self.original_num_edges = min(original_action_edges.size(0), num_edges)
+
         self.moves_this_turn = []
         self.starting_node_features = torch.tensor(game.create_node_features(), dtype= torch.float, device=self.device)
 
@@ -831,7 +832,7 @@ class RLGNNAgent(AgentBase):
         for tgt, srcs in attack_targets.items():
             if len(srcs) > 1:
                 # Reward for each region attacked from multiple sources
-                multi_side_attack_reward += 0.1 * (len(srcs) - 1)  # Tune as needed
+                multi_side_attack_reward += 0.05 * (len(srcs) - 1)  # Tune as needed
 
         reward += multi_side_attack_reward
 

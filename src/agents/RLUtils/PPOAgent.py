@@ -147,6 +147,7 @@ class PPOAgent:
         if gradient_norm > 50:
             # Very large gradients - use fewer epochs to avoid instability
             suggested_epochs = 1
+            self.ppo_epochs = suggested_epochs
             reason = "large gradients (>50)"
         elif gradient_norm > 20:
             # Moderate gradients - standard epochs
@@ -155,7 +156,8 @@ class PPOAgent:
         elif gradient_norm < 1:
             # Very small gradients - might need more epochs or learning has stagnated
             if grad_cv < 0.1:  # Stable small gradients
-                suggested_epochs = min(self.ppo_epochs + 1, 4)  # Increase epochs slightly
+                self.ppo_epochs += 1
+                suggested_epochs = self.ppo_epochs  # Increase epochs slightly
                 reason = "small stable gradients (<1)"
             else:
                 suggested_epochs = self.ppo_epochs  # Unstable small gradients
@@ -166,7 +168,8 @@ class PPOAgent:
                 suggested_epochs = self.ppo_epochs
                 reason = "healthy stable gradients (1-20)"
             else:  # Unstable
-                suggested_epochs = max(self.ppo_epochs - 1, 1)  # Reduce epochs for stability
+                self.ppo_epochs -= 1
+                suggested_epochs = max(self.ppo_epochs, 1)  # Reduce epochs for stability
                 reason = "healthy but unstable gradients (1-20)"
         
         # Smooth transitions - don't change epochs too rapidly
@@ -237,7 +240,7 @@ class PPOAgent:
             # Get properly batched inputs - no reshaping needed!
             starting_features_batched = buffer.get_starting_node_features()  # [batch_size, num_nodes, features]
             post_features_batched = buffer.get_post_placement_node_features()  # [batch_size, num_nodes, features]
-            action_edges_batched = buffer.get_edges()  # [batch_size, 42, 2]
+            action_edges_batched = buffer.get_edges()  # [batch_size, num_edges, 2]
             
             # Optional verification of input structure
             self.verifier.verify_structural_integrity(
@@ -466,7 +469,6 @@ class PPOAgent:
             
             placement_entropy, edge_entropy, army_entropy = compute_entropy(placement_logits_for_entropy, attack_logits, army_logits)
 
-            entropy = placement_entropy + edge_entropy + army_entropy
             if isinstance(placement_entropy, torch.Tensor):
                 self.placement_entropy_tracker.log(placement_entropy.item())
             else:

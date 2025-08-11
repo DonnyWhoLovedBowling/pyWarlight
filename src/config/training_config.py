@@ -563,10 +563,10 @@ def get_residual_low_entropy_config() -> TrainingConfig:
     # Very aggressive entropy schedule for maximum decisiveness
     config.ppo.entropy_coeff_start = 0.2  # Start very high
     config.ppo.entropy_coeff_decay = 0.1  # Decay to near zero (90% reduction)
-    config.ppo.entropy_decay_episodes = 10000  # Very fast decay (2000 episodes)
-    config.ppo.placement_entropy_coeff = 0.5  # Very high placement entropy weight
-    config.ppo.edge_entropy_coeff = 0.8  # Very high edge entropy weight
-    config.ppo.army_entropy_coeff = 0.05  # High army entropy weight
+    config.ppo.entropy_decay_episodes = 1000  # Very fast decay (2000 episodes)
+    config.ppo.placement_entropy_coeff = .1  # Very high placement entropy weight
+    config.ppo.edge_entropy_coeff = .1  # Very high edge entropy weight
+    config.ppo.army_entropy_coeff = .1  # High army entropy weight
     
     # Verification
     config.verification.enabled = False
@@ -706,15 +706,15 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.ppo.lam = 0.95
     
     # Entropy coefficients tuned for 4 army options
-    config.ppo.entropy_coeff_start = 0.6
-    config.ppo.entropy_coeff_decay = 0.95
-    config.ppo.entropy_decay_episodes = 8000
-    config.ppo.placement_entropy_coeff = 0.2
-    config.ppo.edge_entropy_coeff = 0.3
-    config.ppo.army_entropy_coeff = 0.15  # Balanced for 4 options
+    config.ppo.entropy_coeff_start = 0.02
+    config.ppo.entropy_coeff_decay = 0.01
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1  # Balanced for 4 options
     
     # Value and advantage settings
-    config.ppo.value_loss_coeff = 0.2  # Higher due to residual stability
+    config.ppo.value_loss_coeff = 0.5  # Higher due to residual stability
     config.ppo.max_grad_norm = 1.0
     config.ppo.adaptive_epochs = True
     config.ppo.kl_threshold = 0.02
@@ -729,7 +729,8 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.verification.gradient_norm_threshold = 1000.0
     config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
-    
+    config.verification.analyze_gradients = True
+
     # Logging
     config.logging.experiment_name = "residual_percentage_4options"
     config.logging.log_frequency = 50
