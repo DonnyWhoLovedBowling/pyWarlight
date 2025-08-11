@@ -731,7 +731,7 @@ class RLGNNAgent(AgentBase):
             # 1️⃣ Region control
             gained_regions = len(curr_regions.difference(prev_regions))
             lost_regions = len(prev_regions.difference(curr_regions))
-            region_reward = gained_regions * 0.05 lost_regions * 0.025
+            region_reward = gained_regions * 0.05 - lost_regions * 0.025
 
             reward += region_reward
 
