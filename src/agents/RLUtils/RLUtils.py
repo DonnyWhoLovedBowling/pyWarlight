@@ -137,16 +137,16 @@ class RolloutBuffer:
 
     def get_edges(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # Pad all edge tensors to 42 edges
-        padded_edges = []
-        for edges in self.edges:
-            if len(edges) < 42:
-                padding = torch.full((42 - len(edges), 2), -1, dtype=edges.dtype)
-                padded = torch.cat([edges, padding], dim=0)
-            else:
-                padded = edges[:42]  # Truncate if somehow > 42
-            padded_edges.append(padded)
-        return torch.stack(padded_edges).to(device)
+        # Pad all edge tensors to num_edges edges
+        # padded_edges = []
+        # for edges in self.edges:
+        #     if len(edges) < num_edges:
+        #         padding = torch.full((num_edges - len(edges), 2), -1, dtype=edges.dtype)
+        #         padded = torch.cat([edges, padding], dim=0)
+        #     else:
+        #         padded = edges[:num_edges]  # Truncate if somehow > num_edges
+        #     padded_edges.append(padded)
+        return torch.stack(self.edges).to(device)
 
     def get_attacks(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -516,11 +516,11 @@ def apply_placement_mask(placement_logits, owned_regions_list, num_regions):
 
 def compute_individual_log_probs(
     attacks: torch.Tensor,            # [batch_size, max_attacks, 4] (src, tgt, used_armies, available_armies)
-    attack_logits: torch.Tensor,      # [batch_size, 42] - PADDED
-    army_logits: torch.Tensor,        # [batch_size, 42, n_army_options] - PADDED  
+    attack_logits: torch.Tensor,      # [batch_size, num_edges] - PADDED
+    army_logits: torch.Tensor,        # [batch_size, num_edges, n_army_options] - PADDED  
     placements: torch.Tensor,         # [batch_size, max_placements]
     placement_logits: torch.Tensor,   # [batch_size, num_nodes]
-    action_edges: torch.Tensor        # [batch_size, 42, 2] - PADDED with (-1,-1)
+    action_edges: torch.Tensor        # [batch_size, num_edges, 2] - PADDED with (-1,-1)
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute individual action log probabilities for per-action PPO ratio calculation.
@@ -540,15 +540,15 @@ def compute_individual_log_probs(
         
         # Handle other tensors that might also be non-batched
         if attack_logits.dim() == 1:
-            attack_logits = attack_logits.unsqueeze(0)  # [1, 42]
+            attack_logits = attack_logits.unsqueeze(0)  # [1, num_edges]
         if army_logits.dim() == 2:
-            army_logits = army_logits.unsqueeze(0)  # [1, 42, n_army_options]
+            army_logits = army_logits.unsqueeze(0)  # [1, num_edges, n_army_options]
         if placements.dim() == 1:
             placements = placements.unsqueeze(0)  # [1, max_placements]
         if attacks.dim() == 2:
             attacks = attacks.unsqueeze(0)  # [1, max_attacks, 3]
         if action_edges.dim() == 2:
-            action_edges = action_edges.unsqueeze(0)  # [1, 42, 2]
+            action_edges = action_edges.unsqueeze(0)  # [1, num_edges, 2]
             
         batch_size = 1
         is_single_sample = True
@@ -611,11 +611,11 @@ def compute_individual_log_probs(
         attack_log_probs = torch.zeros(batch_size, max_attacks, dtype=torch.float, device=device)
     else:
         # Create vectorized edge lookup
-        action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, 42]
+        action_edges_flat = action_edges[:, :, 0] * num_nodes + action_edges[:, :, 1]  # [batch_size, num_edges]
         attacks_flat = attacks[:, :, 0] * num_nodes + attacks[:, :, 1]  # [batch_size, max_attacks]
         
         # Find matching edges using broadcasting
-        edge_matches = (attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, 42]
+        edge_matches = (attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, num_edges]
         edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
 
         # Mask valid attacks and edges
@@ -623,7 +623,7 @@ def compute_individual_log_probs(
         valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
 
         # --- Individual attack log-probs (edge + army) ---
-        edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, 42]
+        edge_log_probs = f.log_softmax(attack_logits, dim=-1)  # [batch_size, num_edges]
 
         # Gather edge and army log-probs
         batch_idx = torch.arange(batch_size, device=device).unsqueeze(1)
@@ -671,7 +671,7 @@ def compute_individual_log_probs(
                     attack_lps.append(torch.tensor(0.0))  # Invalid attack
             army_lp_list.append(torch.stack(attack_lps))
         
-        army_lp = torch.stack(army_lp_list)  # [batch_size, max_attacks]
+        army_lp = torch.stack(army_lp_list).to(device=attack_logits.device)  # [batch_size, max_attacks]
 
         # Apply valid mask to army log-probs (zeros out padded attacks)
         army_lp = army_lp * valid_match_mask.float()

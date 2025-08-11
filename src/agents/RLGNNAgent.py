@@ -6,6 +6,7 @@ import sys
 import math
 import hashlib
 import json
+import os
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -48,11 +49,14 @@ class RLGNNAgent(AgentBase):
     in_channels = 7
     hidden_channels = 64
     batch_size = 24  # Restored - root cause was edge masking inconsistency, not model drift
-    device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
+    default_device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
     
     # Use factory to create model based on config
-    config = ConfigFactory.create('residual_low_entropy')  # Use aggressive entropy reduction for over-exploration fix
-    model = ModelFactory.create_model(config).to(device)
+    # Check for environment variable or use default
+    config_name = os.environ.get('RLGNN_CONFIG', 'residual_percentage')
+    config = ConfigFactory.create(config_name)  # Use configurable training config
+    
+    model = ModelFactory.create_model(config).to(default_device)
 
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
@@ -83,7 +87,7 @@ class RLGNNAgent(AgentBase):
     moves_this_turn = []
     total_rewards = defaultdict(float)
     prev_state: PrevStateBuffer = None
-    writer = SummaryWriter(log_dir=f"analysis/logs/{config.get_experiment_log_dir()}")  # Back to stable experiment
+    writer = SummaryWriter(log_dir=config.get_experiment_log_dir())  # Back to stable experiment
 
     game_number = 1
     num_attack_tracker = StatTracker()
@@ -104,6 +108,18 @@ class RLGNNAgent(AgentBase):
     def device(self):
         return next(self.model.parameters()).device
     
+    def set_config(self, config_name: str):
+        """
+        Set a new training configuration by name.
+        
+        Args:
+            config_name: Name of the configuration to load (e.g., 'residual_percentage')
+        """
+        self.config_name = config_name
+        new_config = ConfigFactory.create(config_name)
+        self.apply_training_config(new_config)
+        print(f"🔄 Switched to configuration: {config_name}")
+
     def enable_verification(self, enable_batch_verification=True, enable_ppo_verification=True):
         """
         Enable optional verification systems for debugging.
@@ -130,10 +146,7 @@ class RLGNNAgent(AgentBase):
             
             # Create new model with the specified architecture
             new_model = ModelFactory.create_model(
-                model_type=config.model.model_type,
-                node_feat_dim=config.model.in_channels,
-                embed_dim=config.model.embed_dim,
-                n_army_options=getattr(config.model, 'n_army_options', 4)
+                config
             ).to(self.device)
             
             # Replace the model
@@ -375,7 +388,7 @@ class RLGNNAgent(AgentBase):
 
 
         # Remove padding from all samples in batch
-        valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, 42]
+        valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, num_edges]
         self.model.to(device)
         placement_logits, attack_logits, army_logits = self.model(
             node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
@@ -403,14 +416,14 @@ class RLGNNAgent(AgentBase):
         if action == Phase.ATTACK_TRANSFER or action is None:
             # Pad attack logits to num_edges edges
             padded_attack = []
-            num_edges = self.model.edge_tensor.numel()
+            num_edges = self.model.edge_tensor.size(1)
             for al in attack_logits_list:
                 if al.numel() == 0:
                     padded = torch.full((num_edges,), -1e9)
                 else:
                     padding_needed = num_edges - al.size(0)
                     if padding_needed > 0:
-                        padding = torch.full((padding_needed,), -1e9)
+                        padding = torch.full((padding_needed,), -1e9, device=device)
                         padded = torch.cat([al, padding])
                     else:
                         padded = al[:num_edges]  # Truncate if too long
@@ -430,8 +443,8 @@ class RLGNNAgent(AgentBase):
                     # Pad edges dimension to num_edges
                     edge_padding_needed = num_edges - arl.size(0)
                     if edge_padding_needed > 0:
-                        edge_padding = torch.full((edge_padding_needed, arl.size(1)), -1e9)
-                        arl_edge_padded = torch.cat([arl, edge_padding], dim=0)
+                        edge_padding = torch.full((edge_padding_needed, arl.size(1)), -1e9, device=device)
+                        arl_edge_padded = torch.cat([arl, edge_padding])
                     else:
                         arl_edge_padded = arl[:num_edges]  # Truncate if too long
 
@@ -454,13 +467,14 @@ class RLGNNAgent(AgentBase):
     def init_turn(self, game: Game):
         if self.model.edge_tensor is None:
             self.model.edge_tensor = torch.tensor(game.world.torch_edge_list, dtype=torch.long, device=self.device)
-        num_edges = self.model.edge_tensor.numel()
+        num_edges = self.model.edge_tensor.size(1)
         original_action_edges = torch.tensor(game.create_action_edges(), dtype=torch.long, device=self.device)
 
         # CONSISTENCY FIX: Pad/truncate action edges to 83 to match batch inference
         if original_action_edges.size(0) < num_edges:
             padding_needed = num_edges - original_action_edges.size(0)
             padding = torch.full((padding_needed, 2), -1, dtype=original_action_edges.dtype, device=original_action_edges.device)
+            self.action_edges = torch.cat([original_action_edges, padding], dim=0)
             self.action_edges = torch.cat([original_action_edges, padding], dim=0)
         elif original_action_edges.size(0) > num_edges:
             self.action_edges = original_action_edges[:num_edges]  # Truncate if too long
@@ -684,8 +698,9 @@ class RLGNNAgent(AgentBase):
         self.prev_state = PrevStateBuffer(prev_state=game, player_id=self.agent_number)
 
         if game.round % self.batch_size == 0 or done:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
             next_value = value * (1 - done)
-            self.ppo_agent.update(self.buffer, next_value, self)
+            self.ppo_agent.update(self.buffer, next_value.to(device), self)
             self.buffer.clear()
             self.model.to('cpu') # Move model to CPU after update to save memory
 

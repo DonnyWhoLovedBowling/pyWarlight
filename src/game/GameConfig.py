@@ -1,10 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from socket import timeout
 
 
 
 @dataclass
 class GameConfig:
-    extra_armies: list[int] = None
+    extra_armies: list[int] = field(default_factory=list)
     max_game_rounds: int = 150
     num_players: int = 2
     manual_distribution:bool = False
@@ -12,6 +13,8 @@ class GameConfig:
     seed: int = -1
     map_name: str = "earth"
     num_games = 0
+    rlgnn_config: str = ""
+    timeout: float = 30.0
 
     def __post_init__(self):
         self.extra_armies = [0] * self.num_players

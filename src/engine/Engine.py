@@ -16,21 +16,6 @@ from src.game.Game import Game
 from src.game.World import World
 
 
-def construct_agent(agent_fqcn: str, num) -> AgentBase:
-    if "RLGNNAgent" in agent_fqcn:
-        agent = RLGNNAgent()
-    elif "random" in agent_fqcn.lower():
-        agent = RandomAgent()
-    elif "napoleon" in agent_fqcn.lower():
-        agent = Napoleon()
-    elif "attila" in agent_fqcn.lower():
-        agent = Attila()
-    else:
-        agent = eval(f"{agent_fqcn[:-2]}()")
-    agent.agent_number = num
-    return agent
-
-
 class Engine:
 
     def __init__(self, config: Config):
@@ -45,6 +30,22 @@ class Engine:
             print(f"setting up agent {p}")
             self.agents[p] = self.setup_agent(self.config.agent_init(p), p)
             self.agents[p].init(timeout_millis=self.config.timeout_millis)
+
+    def construct_agent(self, agent_fqcn: str, num) -> AgentBase:
+        if "RLGNNAgent" in agent_fqcn:
+            agent = RLGNNAgent()
+            agent.set_config(self.config.game_config.rlgnn_config)
+        elif "random" in agent_fqcn.lower():
+            agent = RandomAgent()
+        elif "napoleon" in agent_fqcn.lower():
+            agent = Napoleon()
+        elif "attila" in agent_fqcn.lower():
+            agent = Attila()
+        else:
+            agent = eval(f"{agent_fqcn[:-2]}()")
+        agent.agent_number = num
+        return agent
+
 
     def timeout(self, agent: AgentBase, elapsed: int):
         if (
@@ -61,7 +62,7 @@ class Engine:
     def setup_agent(self, agent_init: str, num: int) -> AgentBase:
         if agent_init.startswith("internal:"):
             agent_fqcn = agent_init[len("internal:") :]
-            ret = construct_agent(agent_fqcn, num)
+            ret = self.construct_agent(agent_fqcn, num)
         elif agent_init.startswith("human:"):
             self.config.visualize = True
             ret = HumanAgent()

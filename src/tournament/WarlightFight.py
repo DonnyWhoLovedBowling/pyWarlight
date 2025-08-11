@@ -74,15 +74,16 @@ class WarlightFight:
         if self.result_dir is None:
             return
 
-        try:
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            out_file = open(f"total_results_{ts}.csv", "w")
-            out_file.write(f"datetime;{self.config.get_csv_header()} \n")
-            out_file.write(
-                f"{datetime.datetime.now()};{self.config.get_csv()};{self.base_seed};{res.get_csv()}"
-            )
-        except BaseException:
-            logging.exception("failed to write matches.csv")
+        if write_total_results := False:
+            try:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                out_file = open(f"total_results_{ts}.csv", "w")
+                out_file.write(f"datetime;{self.config.get_csv_header()} \n")
+                out_file.write(
+                    f"{datetime.datetime.now()};{self.config.get_csv()};{self.base_seed};{res.get_csv()}"
+                )
+            except BaseException:
+                logging.exception("failed to write matches.csv")
 
     def fight(self, verbose: bool) -> TotalResults:
         num_players = self.config.num_players()

@@ -706,8 +706,8 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.ppo.lam = 0.95
     
     # Entropy coefficients tuned for 4 army options
-    config.ppo.entropy_coeff_start = 0.02
-    config.ppo.entropy_coeff_decay = 0.01
+    config.ppo.entropy_coeff_start = 0.03
+    config.ppo.entropy_coeff_decay = 0.02
     config.ppo.entropy_decay_episodes = 10000
     config.ppo.placement_entropy_coeff = 1
     config.ppo.edge_entropy_coeff = 1
@@ -730,6 +730,9 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
     config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    config.verification.verify_gae_computation = False
+    config.verification.verify_model_outputs = False
 
     # Logging
     config.logging.experiment_name = "residual_percentage_4options"

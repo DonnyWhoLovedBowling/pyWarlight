@@ -25,6 +25,8 @@ if __name__ == "__main__":
     result_dir = 'results'
     config = Config()
     skip_next = False
+    rlgnn_config = ''  # Store the RLGNNAgent config name
+
     for i in range(1, len(sys.argv)):
         if skip_next:
             skip_next = False
@@ -38,7 +40,7 @@ if __name__ == "__main__":
                 config.game_config.map_name = sys.argv[i + 1]
                 skip_next = True
             elif s == "-maxrounds":
-                config.game_config.max_rounds = int(sys.argv[i + 1])
+                config.game_config.num_players = int(sys.argv[i + 1])
             elif s == "-resultdir":
                 config.game_config.result_dir = sys.argv[i + 1]
                 skip_next = True
@@ -55,10 +57,14 @@ if __name__ == "__main__":
                 skip_next = True
             elif s == "-warlords":
                 config.game_config.warlords = True
+            elif s == "-config":
+                config.game_config.rlgnn_config = sys.argv[i + 1]
+                skip_next = True
             else:
                 raise Exception("Invalid argument", s)
         else:
             agents.append(sys.argv[i])
+        
     if len(agents) > 4:
         raise Exception("Too many agents")
     if config.game_config.num_games > 0:

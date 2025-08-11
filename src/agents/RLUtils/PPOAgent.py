@@ -78,7 +78,7 @@ class PPOAgent:
         self.current_adaptive_epochs = ppo_epochs
         
         if 1==0:
-            load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint.pt")
+            load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint_2025-08-11_01-11-14_10000.pt")
     
     def _pad_log_prob_tensors_to_match(self, new_tensor, old_tensor, tensor_name=""):
         """
@@ -168,8 +168,9 @@ class PPOAgent:
                 suggested_epochs = self.ppo_epochs
                 reason = "healthy stable gradients (1-20)"
             else:  # Unstable
-                self.ppo_epochs -= 1
-                suggested_epochs = max(self.ppo_epochs, 1)  # Reduce epochs for stability
+                suggested_epochs = max(self.ppo_epochs - 1, 1)  # Reduce epochs for stability
+                self.ppo_epochs = suggested_epochs
+
                 reason = "healthy but unstable gradients (1-20)"
         
         # Smooth transitions - don't change epochs too rapidly
@@ -198,7 +199,7 @@ class PPOAgent:
         rewards_tensor = buffer.get_rewards()
         self.reward_normalizer.update(rewards_tensor)
         normalized_rewards_tensor = self.reward_normalizer.normalize(rewards_tensor)
-
+        device = rewards_tensor.device
         advantages, returns = compute_gae(
             normalized_rewards_tensor,
             buffer.get_values(),
@@ -218,8 +219,9 @@ class PPOAgent:
 
         self.adv_tracker.log(advantages.mean().item())
         
-        # Store original advantages before normalization for verification
+        # Store original advantages and returns before normalization/clipping for verification
         original_advantages = advantages.clone()
+        original_returns = returns.clone()
         
         if agent.game_number > 1:
             std = self.adv_tracker.std()
@@ -232,10 +234,12 @@ class PPOAgent:
         initial_grad_norm = None
         
         for epoch in range(self.ppo_epochs):  # Initial run to get gradient norm
-            # CRITICAL FIX: Ensure model is in eval mode for consistent inference
-            # Training mode can cause different behavior (dropout, batch norm) leading to inconsistent logits
+            # CONSISTENCY FIX: Keep model in training mode to match action selection behavior
+            # The model should be in the same mode during action selection and PPO updates
+            # to ensure log probabilities are computed consistently
             was_training = agent.model.training
-            agent.model.eval()
+            # Note: We keep the model in training mode instead of switching to eval mode
+            # This ensures consistency with action selection when log probabilities were captured
             
             # Get properly batched inputs - no reshaping needed!
             starting_features_batched = buffer.get_starting_node_features()  # [batch_size, num_nodes, features]
@@ -305,11 +309,7 @@ class PPOAgent:
             
             # Optional verification of old log probabilities
             self.verifier.verify_old_log_probs(old_placement_log_probs, old_attack_log_probs)
-            
-            # Calculate per-action ratios
-            placement_diff = new_placement_log_probs - old_placement_log_probs if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0 else torch.tensor([])
-            attack_diff = new_attack_log_probs - old_attack_log_probs if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else torch.tensor([])
-            
+
             # Ensure tensors have matching shapes by padding to the maximum size
             new_placement_log_probs, old_placement_log_probs = self._pad_log_prob_tensors_to_match(
                 new_placement_log_probs, old_placement_log_probs, "placement"
@@ -349,9 +349,9 @@ class PPOAgent:
                     placement_count = placement_mask.sum(dim=1).float() + eps
                     placement_avg_ratio = valid_placement_ratios.sum(dim=1) / placement_count
                 else:
-                    placement_avg_ratio = torch.ones(len(advantages), device=new_placement_log_probs.device if new_placement_log_probs.numel() > 0 else 'cpu')
+                    placement_avg_ratio = torch.ones(len(advantages), device=device)
             else:
-                placement_avg_ratio = torch.ones(len(advantages), device=new_attack_log_probs.device if new_attack_log_probs.numel() > 0 else 'cpu')
+                placement_avg_ratio = torch.ones(len(advantages), device=device)
             
             if attack_ratios.numel() > 0:
                 # Better approach: Use old_attack_log_probs to identify episodes with real attacks
@@ -366,7 +366,7 @@ class PPOAgent:
                     valid_count = valid_attack_mask.sum(dim=1).float()
                     
                     # Only compute ratios for episodes that actually have attacks
-                    attack_avg_ratio = torch.ones(len(advantages), device=attack_ratios.device)
+                    attack_avg_ratio = torch.ones(len(advantages), device=device)
                     episodes_with_attacks_indices = episodes_with_attacks.nonzero(as_tuple=True)[0]
                     
                     if len(episodes_with_attacks_indices) > 0:
@@ -374,9 +374,9 @@ class PPOAgent:
                         attack_avg_ratio[episodes_with_attacks_indices] = attack_ratios_for_episodes
                 else:
                     # No episodes have attacks - use neutral ratio
-                    attack_avg_ratio = torch.ones(len(advantages), device=attack_ratios.device)
+                    attack_avg_ratio = torch.ones(len(advantages), device=device)
             else:
-                attack_avg_ratio = torch.ones(len(advantages), device=new_attack_log_probs.device if new_attack_log_probs.numel() > 0 else 'cpu')
+                attack_avg_ratio = torch.ones(len(advantages), device=device)
             
             # Combine ratios with equal weighting
             ratio = (placement_avg_ratio + attack_avg_ratio) / 2.0
@@ -411,9 +411,8 @@ class PPOAgent:
             # Optional verification of action distribution
             self.verifier.analyze_action_distribution(placement_logits, attack_logits, army_logits, agent)
 
-            # Restore model training mode for gradient computation
-            if was_training:
-                agent.model.train()
+            # Note: Model remains in training mode throughout PPO update for consistency
+            # with action selection behavior (no mode switching needed)
             
             agent.total_rewards['new_log_probs_mean'] = total_new_log_probs.mean().item()
             agent.total_rewards['old_log_probs_mean'] = total_old_log_probs.mean().item()
@@ -429,21 +428,14 @@ class PPOAgent:
                 raise RuntimeError(f'policy_loss inf!: {ratio}, {advantages}')
             self.ratio_tracker.log(ratio.mean().item())
             
-            # Ensure model is in eval mode for consistent value computation
-            model_was_training = self.policy.training
-            if model_was_training:
-                self.policy.eval()
-            
+            # Keep model in training mode for consistent value computation
+            # (no mode switching to maintain consistency throughout)
             with torch.no_grad():
                 values_pred = self.policy.get_value(buffer.get_end_features())
             
-            # Restore training mode for gradient computation
-            if model_was_training:
-                self.policy.train()
-            
             # Optional verification of value computation
             self.verifier.verify_value_computation(
-                agent, buffer.get_end_features(), buffer, values_pred, returns, original_advantages
+                agent, buffer.get_end_features(), buffer, values_pred, original_returns, original_advantages
             )
             
             # Value loss with optional clipping for additional regularization
@@ -538,8 +530,23 @@ class PPOAgent:
 
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.gradient_clip_norm)
+# Ensure all model parameters and optimizer state are on the same device before step
+            target_device = next(self.policy.parameters()).device
+            for param_group in self.optimizer.param_groups:
+                for param in param_group['params']:
+                    if param.grad is not None and param.grad.device != target_device:
+                        param.grad = param.grad.to(target_device)
+                    if param.device != target_device:
+                        param.data = param.data.to(target_device)
+
+
+            # Move optimizer state to target device
+            for state in self.optimizer.state.values():
+                for key, value in state.items():
+                    if isinstance(value, torch.Tensor) and value.device != target_device:
+                        state[key] = value.to(target_device)
+
             self.optimizer.step()
-            
             # Break early if we've done enough epochs (for adaptive case)
             if self.adaptive_epochs and epoch >= self.current_adaptive_epochs - 1:
                 break
