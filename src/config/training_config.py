@@ -407,6 +407,56 @@ def get_larger_batch_multi_epoch_config() -> TrainingConfig:
     return config
 
 
+def get_residual_percentage_fixed_gradients_config() -> TrainingConfig:
+    """Configuration for residual model with 4 army percentage options and fixed gradient clipping"""
+    config = TrainingConfig()
+    
+    # Model settings with percentage-based army selection (same as residual_percentage)
+    config.model.model_type = "residual"  # Use stable residual model
+    config.model.embed_dim = 64
+    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
+    config.model.max_army_send = 50  # Kept for backward compatibility
+    
+    # PPO settings - mostly same as residual_percentage but with FIXED gradient clipping
+    config.ppo.learning_rate = 1e-4  # Same as working period
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # 🎯 KEY FIX: Gradient clipping set to allow healthy gradients
+    config.ppo.gradient_clip_norm = 15.0  # Based on analysis: mean ~15 during winning period
+    
+    # Entropy coefficients tuned for 4 army options (same as original)
+    config.ppo.entropy_coeff_start = 0.05
+    config.ppo.entropy_coeff_decay = 0.04
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1  # Balanced for 4 options
+    
+    # Value and advantage settings (same as original)
+    config.ppo.value_loss_coeff = 0.5  # Higher due to residual stability
+    config.ppo.adaptive_epochs = True
+    
+    # Enhanced verification to monitor gradient health
+    config.verification.enabled = True
+    config.verification.detailed_logging = True  # Enable for gradient monitoring
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True  # IMPORTANT: Monitor gradient flow
+    config.verification.analyze_weight_changes = True
+    config.verification.verify_gae_computation = False
+    config.verification.verify_model_outputs = False
+
+    # Logging with descriptive name
+    config.logging.experiment_name = "residual_percentage_fixed_gradients"
+    config.logging.print_every_n_episodes = 50
+    config.logging.log_gradient_metrics = True  # Enable gradient logging
+    
+    return config
+
+
 # Configuration factory
 class ConfigFactory:
     """Factory for creating and managing configurations"""
@@ -429,6 +479,7 @@ class ConfigFactory:
             "transformer_model": get_transformer_model_config,
             "residual_low_entropy": get_residual_low_entropy_config,
             "residual_percentage": get_residual_percentage_config,
+            "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
         }
         
         if config_name not in configs:
@@ -459,7 +510,7 @@ class ConfigFactory:
     @staticmethod
     def list_available() -> list[str]:
         """List all available pre-defined configurations"""
-        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage"]
+        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage", "residual_percentage_fixed_gradients"]
 
 
 def get_residual_model_config() -> TrainingConfig:
@@ -706,8 +757,8 @@ def get_residual_percentage_config() -> TrainingConfig:
     config.ppo.lam = 0.95
     
     # Entropy coefficients tuned for 4 army options
-    config.ppo.entropy_coeff_start = 0.3
-    config.ppo.entropy_coeff_decay = 0.27
+    config.ppo.entropy_coeff_start = 0.05
+    config.ppo.entropy_coeff_decay = 0.04
     config.ppo.entropy_decay_episodes = 10000
     config.ppo.placement_entropy_coeff = 1
     config.ppo.edge_entropy_coeff = 1

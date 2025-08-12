@@ -365,7 +365,7 @@ class PPOAgent:
                     valid_ratios = attack_ratios * valid_attack_mask.float()
                     valid_count = valid_attack_mask.sum(dim=1).float()
                     
-                    # Only compute ratios for episodes that actually have attacks
+                    # Only compute rcheckatios for episodes that actually have attacks
                     attack_avg_ratio = torch.ones(len(advantages), device=device)
                     episodes_with_attacks_indices = episodes_with_attacks.nonzero(as_tuple=True)[0]
                     
@@ -549,8 +549,6 @@ class PPOAgent:
 
             self.optimizer.step()
             # Break early if we've done enough epochs (for adaptive case)
-            if self.adaptive_epochs and epoch >= self.current_adaptive_epochs - 1:
-                break
             if os.path.exists("res/model/") and agent.game_number % 500 == 0:
                 ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 torch.save(
@@ -560,3 +558,5 @@ class PPOAgent:
                     },
                     f"res/model/checkpoint_{ts}_{agent.game_number}.pt",
                 )
+            if self.adaptive_epochs and epoch >= self.current_adaptive_epochs - 1:
+                break
