@@ -3,12 +3,16 @@ import logging
 import os
 import torch
 import torch.nn.functional as f
+from typing import Optional, TYPE_CHECKING
 from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
 from src.game.Phase import Phase
-from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_individual_log_probs, load_checkpoint
+from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_individual_log_probs
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 from src.config.training_config import VerificationConfig
 from src.agents.RLUtils.RLUtils import apply_placement_masking
+
+if TYPE_CHECKING:
+    from src.agents.RLUtils.CheckpointManager import CheckpointManager
 
 
 class PPOAgent:
@@ -70,6 +74,9 @@ class PPOAgent:
         # Initialize verification system
         self.verifier = PPOVerifier(verification_config=verification_config)
         
+        # Initialize checkpoint manager (will be set by agent)
+        self.checkpoint_manager: Optional['CheckpointManager'] = None
+        
         # For weight change tracking
         self.prev_weights = None
         
@@ -77,9 +84,7 @@ class PPOAgent:
         self.gradient_history = []
         self.current_adaptive_epochs = ppo_epochs
         
-        if 1==0:
-            load_checkpoint(self.policy, self.optimizer, "res/model/checkpoint_2025-08-11_01-11-14_10000.pt")
-    
+
     def _pad_log_prob_tensors_to_match(self, new_tensor, old_tensor, tensor_name=""):
         """
         Ensure two log probability tensors have matching shapes by padding to maximum size.
@@ -549,14 +554,10 @@ class PPOAgent:
 
             self.optimizer.step()
             # Break early if we've done enough epochs (for adaptive case)
-            if os.path.exists("res/model/") and agent.game_number % 500 == 0:
-                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                torch.save(
-                    {
-                        "model_state_dict": self.policy.state_dict(),
-                        "optimizer_state_dict": self.optimizer.state_dict(),
-                    },
-                    f"res/model/checkpoint_{ts}_{agent.game_number}.pt",
-                )
             if self.adaptive_epochs and epoch >= self.current_adaptive_epochs - 1:
                 break
+                
+        # Save checkpoint using CheckpointManager if available
+        if self.checkpoint_manager and self.checkpoint_manager.should_save_checkpoint(agent.game_number):
+            self.checkpoint_manager.save_checkpoint(agent, agent.game_number)
+

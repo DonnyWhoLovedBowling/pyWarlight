@@ -1,28 +1,25 @@
-from email.policy import default
-import logging
 import random
 import time
 import sys
 import math
-import hashlib
-import json
 import os
+from typing import Optional
 
 from collections import defaultdict
 from dataclasses import dataclass
-from io import TextIOWrapper
 
 from torch.utils.tensorboard import SummaryWriter
 
 
-from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
 from src.agents.RLUtils.ModelFactory import ModelFactory
+from src.agents.RLUtils.RLUtils import load_checkpoint
+from src.agents.RLUtils.CheckpointManager import CheckpointManager
 from src.game.FightSide import FightSide
 from src.game.Phase import Phase
 from src.config.training_config import TrainingConfig, ConfigFactory
 
 if sys.version_info[1] < 11:
-    from typing_extensions import override, Literal
+    from typing_extensions import override
 else:
     from typing import override
 
@@ -37,6 +34,7 @@ from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.PlaceArmies import PlaceArmies
 from src.agents.RLUtils.RLUtils import RolloutBuffer, StatTracker, compute_individual_log_probs, PrevStateBuffer
 from src.agents.RLUtils.PPOAgent import PPOAgent
+from src.agents.RLUtils.CheckpointManager import CheckpointManager
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 
 import faulthandler
@@ -93,6 +91,9 @@ class RLGNNAgent(AgentBase):
     num_attack_tracker = StatTracker()
     num_succes_attacks_tracker = StatTracker()
     army_per_attack_tracker = StatTracker()
+    
+    # Checkpoint management
+    checkpoint_manager: Optional[CheckpointManager] = None
 
     # histogram distributions
     placement_regions = []
@@ -211,6 +212,57 @@ class RLGNNAgent(AgentBase):
                 self.writer.close()
                 self.writer = SummaryWriter(log_dir=experiment_log_dir)
         
+        # Initialize checkpoint manager
+        self.checkpoint_manager = CheckpointManager(config, config.logging.experiment_name)
+        self.ppo_agent.checkpoint_manager = self.checkpoint_manager
+        
+        # Handle checkpoint resuming
+        if config.logging.resume_from_checkpoint or config.logging.auto_resume_latest:
+            self._load_checkpoint_if_requested(config)
+    
+    def _load_checkpoint_if_requested(self, config):
+        """Load checkpoint if requested in config"""
+        if not self.checkpoint_manager:
+            print("❌ Checkpoint manager not initialized")
+            return
+            
+        checkpoint_path = None
+        
+        if config.logging.resume_from_checkpoint and config.logging.checkpoint_path:
+            # Load specific checkpoint
+            checkpoint_path = config.logging.checkpoint_path
+            print(f"📂 Attempting to load specific checkpoint: {checkpoint_path}")
+            
+        elif config.logging.auto_resume_latest:
+            # Find latest checkpoint for this experiment
+            experiment_name = config.logging.resume_experiment_name or config.logging.experiment_name
+            checkpoint_path = self.checkpoint_manager.find_latest_checkpoint(experiment_name)
+            
+            if checkpoint_path:
+                print(f"📂 Auto-resuming from latest checkpoint: {os.path.basename(checkpoint_path)}")
+            else:
+                print(f"⚠️  No checkpoints found for experiment '{experiment_name}', starting fresh")
+                return
+        
+        if checkpoint_path:
+            # Configure what to load
+            load_config = {
+                "model": config.logging.load_model_state,
+                "optimizer": config.logging.load_optimizer_state,
+                "reward_normalizer": config.logging.load_reward_normalizer,
+                "game_number": config.logging.load_game_number,
+                "stat_trackers": config.logging.load_stat_trackers,
+                "training_state": config.logging.load_training_state,
+                "ppo_state": True
+            }
+            
+            success = self.checkpoint_manager.load_checkpoint(self, checkpoint_path, load_config)
+            if success:
+                print(f"✅ Successfully resumed training from checkpoint!")
+                print(f"   Continuing from game number: {self.game_number}")
+            else:
+                print(f"❌ Failed to load checkpoint, starting fresh training")
+        
         # Store the new config
         self.config = config
         
@@ -226,9 +278,13 @@ class RLGNNAgent(AgentBase):
     def init(self, timeout_millis: int):
         random.seed(time.time())
         faulthandler.enable()
-        
-        # Apply the full training configuration
         self.apply_training_config(self.config)
+
+        if 1==0:
+            load_checkpoint(self.model, self.optimizer, "res/model/checkpoint_2025-08-12_22-06-29_residual_percentage_fixed_gradients_5500.pt")
+            self.game_number = 5501  # Set game number to match checkpoint
+
+        # Apply the full training configuration
 
 
     def run_model(self, node_features: torch.Tensor, action_edges: torch.Tensor = None, action = None):
@@ -410,6 +466,7 @@ class RLGNNAgent(AgentBase):
                 placement_logits = torch.stack(placement_logits_list)  # [batch_size, num_nodes]
             else:
                 placement_logits = torch.zeros(batch_size, num_nodes)
+            # Log placement logits histogram
         else:
             placement_logits = torch.tensor([])
 
@@ -429,6 +486,7 @@ class RLGNNAgent(AgentBase):
                         padded = al[:num_edges]  # Truncate if too long
                 padded_attack.append(padded)
             attack_logits = torch.stack(padded_attack)  # [batch_size, 42]
+            # Log attack (edge) logits histogram
 
             # Pad army logits to [42, n_army_options]
             n_army_options = max(arl.size(1) if arl.numel() > 0 else 0 for arl in army_logits_list)
@@ -457,6 +515,7 @@ class RLGNNAgent(AgentBase):
                         padded = arl_edge_padded[:, :n_army_options]
                 padded_army.append(padded)
             army_logits = torch.stack(padded_army)  # [batch_size, num_edges, n_army_options]
+            # Log army logits histogram
         else:
             attack_logits = torch.tensor([])
             army_logits = torch.tensor([])
@@ -520,6 +579,11 @@ class RLGNNAgent(AgentBase):
         self.placement_logits[list(not_mine)] = float('-inf')  # Mask out regions not owned by the agent
 
         placement_probs = self.placement_logits.softmax(dim=0)
+        if placement_probs.numel() > 0 and self.game_number % 10 == 0 and game.round % 10 == 0:
+            # Log placement probabilities histogram every 10 games
+            for p in placement_probs.tolist():
+                self.writer.add_histogram('placement_probs', p, self.game_number)
+
         try:
             nodes = torch.multinomial(
                 placement_probs, num_samples=available, replacement=True
@@ -573,8 +637,9 @@ class RLGNNAgent(AgentBase):
                                                                           action=Phase.ATTACK_TRANSFER)
 
         self.attack_logits, self.army_logits = attack_logits, army_logits
+
         if per_node:
-            edges = self.sample_attacks_per_node()
+            edges = self.sample_attacks_per_node(game)
         else:
             edges = self.sample_n_attacks(game, 5)
         return self.create_attack_transfers(game, edges)
@@ -631,12 +696,6 @@ class RLGNNAgent(AgentBase):
         self.writer.add_scalar('turn_with_mult_attacks', self.total_rewards['turn_with_mult_attacks'] / game.round, self.game_number)
         self.writer.add_scalar('num_regions', self.total_rewards['num_regions'] / game.round, self.game_number)
         self.writer.add_scalar('army_difference', self.total_rewards['army_difference'] / game.round, self.game_number)
-        # self.writer.add_histogram("Placements/region",
-        #                           torch.tensor(self.placement_regions, dtype=torch.float16),
-        #                           self.game_number)
-        # self.writer.add_histogram("Placements/n_neighbours",
-        #                           torch.tensor(self.placement_neighbours, dtype=torch.float16),
-        #                           self.game_number)
 
         for key, value in self.total_rewards.items():
             if key in ['missed opportunities', 'missed transfers', 'turn_with_attack', 'turn_with_mult_attacks', 'num_regions', 'army_difference']:
@@ -929,7 +988,7 @@ class RLGNNAgent(AgentBase):
                 ret.append((src.item(), tgt))
         return ret
 
-    def sample_attacks_per_node(self):
+    def sample_attacks_per_node(self, game: Game):
         if len(self.action_edges) == 0:
             return []
         
@@ -940,7 +999,11 @@ class RLGNNAgent(AgentBase):
         
         if len(valid_action_edges) == 0:
             return []
-            
+        if valid_attack_logits.numel() > 0 and self.game_number % 10 == 0 and game.round % 10 == 0:
+            # Log placement probabilities histogram every 10 games
+            for p in valid_attack_logits.softmax(dim=0).cpu().detach().numpy():
+                self.writer.add_histogram('edge_probs',p , self.game_number)
+
         src_nodes = torch.unique(valid_action_edges[:, 0])
         ret = []
         edge_selection_log_probs = []
@@ -986,6 +1049,7 @@ class RLGNNAgent(AgentBase):
         
         # Precompute edge log probabilities for efficiency (only for valid edges)
         edge_log_probs = f.log_softmax(self.attack_logits[valid_edge_mask], dim=0)
+
         for src, tgt in edges:
             # Find the index in the VALID edges
             valid_action_edges = self.action_edges[valid_edge_mask]
@@ -1009,9 +1073,6 @@ class RLGNNAgent(AgentBase):
             # Choose how many armies to send using raw logits (no temperature scaling or noise)
             try:
                 army_probs = f.softmax(self.army_logits[original_idx], dim=-1)
-                # if len(army_logit) == 0:
-                #     actual_attack_log_probs.append(0.0)  # No attack made
-                #     continue
             except IndexError as ie:
                 print(self.army_logits)
                 print(original_idx)
@@ -1021,9 +1082,13 @@ class RLGNNAgent(AgentBase):
             try:
                 k = torch.multinomial(army_probs, num_samples=1).item()
             except IndexError as ie:
-                print(army_logit)
                 raise ie
-            used = round((float(k+1)/self.model.attack_head.n_army_options)*(game.armies[src]-1))
+            if army_probs.numel() > 0 and self.game_number % 10 == 0 and game.round % 10 == 0:
+                # Log placement probabilities histogram every 10 games
+                for p in army_probs.cpu().detach().numpy():
+                    self.writer.add_histogram('army_probs', p, self.game_number)
+
+            used = round((float(k+1)/4)*(game.armies[src]-1))#TODO don't hardcode 4, use config value
             if used == 0 or used >= available_armies[src]:
                 actual_attack_log_probs.append(0.0)  # No attack made
                 continue

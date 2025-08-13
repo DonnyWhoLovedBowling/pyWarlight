@@ -119,6 +119,20 @@ class LoggingConfig:
     checkpoint_every_n_episodes: int = 100       # Save checkpoint every N episodes
     keep_last_n_checkpoints: int = 5             # Number of checkpoints to keep
     
+    # Checkpoint resuming
+    resume_from_checkpoint: bool = False          # Whether to resume from a checkpoint
+    checkpoint_path: str = ""                    # Specific checkpoint path to resume from
+    auto_resume_latest: bool = False             # Automatically resume from latest checkpoint
+    resume_experiment_name: str = ""             # Resume from latest checkpoint of this experiment
+    
+    # What to load from checkpoint
+    load_model_state: bool = True                # Load model weights
+    load_optimizer_state: bool = True            # Load optimizer state
+    load_reward_normalizer: bool = True          # Load reward normalizer state
+    load_game_number: bool = True                # Resume game numbering
+    load_stat_trackers: bool = True              # Load tracking statistics
+    load_training_state: bool = True             # Load training state (entropy coeffs, etc.)
+    
     # Metrics to log
     log_gradient_metrics: bool = True             # Log gradient norms and statistics
     log_weight_change_metrics: bool = True       # Log weight change statistics
@@ -442,15 +456,65 @@ def get_residual_percentage_fixed_gradients_config() -> TrainingConfig:
     
     # Enhanced verification to monitor gradient health
     config.verification.enabled = True
-    config.verification.detailed_logging = True  # Enable for gradient monitoring
+    config.verification.detailed_logging = False  # Enable for gradient monitoring
     config.verification.batch_verification_enabled = False
     config.verification.analyze_gradients = True  # IMPORTANT: Monitor gradient flow
-    config.verification.analyze_weight_changes = True
+    config.verification.analyze_weight_changes = False
     config.verification.verify_gae_computation = False
     config.verification.verify_model_outputs = False
 
     # Logging with descriptive name
     config.logging.experiment_name = "residual_percentage_fixed_gradients"
+    config.logging.print_every_n_episodes = 50
+    config.logging.log_gradient_metrics = True  # Enable gradient logging
+    
+    return config
+
+
+def get_residual_percentage_boosted_learning_config() -> TrainingConfig:
+    """Configuration for residual model with fixed gradients AND boosted learning rate"""
+    config = TrainingConfig()
+    
+    # Model settings with percentage-based army selection (same as residual_percentage)
+    config.model.model_type = "residual"  # Use stable residual model
+    config.model.embed_dim = 64
+    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
+    config.model.max_army_send = 50  # Kept for backward compatibility
+    
+    # PPO settings - BOOSTED learning rate based on analysis
+    config.ppo.learning_rate = 2e-4  # DOUBLED from 1e-4 based on analysis
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # 🎯 KEY FIX: Higher gradient clipping threshold for stronger learning signal
+    config.ppo.gradient_clip_norm = 25.0  # Increased from 15.0 to allow even stronger gradients
+    
+    # Entropy coefficients tuned for 4 army options (same as original)
+    config.ppo.entropy_coeff_start = 0.05
+    config.ppo.entropy_coeff_decay = 0.04
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1  # Balanced for 4 options
+    
+    # Value and advantage settings (same as original)
+    config.ppo.value_loss_coeff = 0.5  # Higher due to residual stability
+    config.ppo.adaptive_epochs = True
+    
+    # Enhanced verification to monitor gradient health
+    config.verification.enabled = True
+    config.verification.detailed_logging = False  # Enable for gradient monitoring
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True  # IMPORTANT: Monitor gradient flow
+    config.verification.analyze_weight_changes = False
+    config.verification.verify_gae_computation = False
+    config.verification.verify_model_outputs = False
+
+    # Logging with descriptive name
+    config.logging.experiment_name = "residual_percentage_boosted_learning"
     config.logging.print_every_n_episodes = 50
     config.logging.log_gradient_metrics = True  # Enable gradient logging
     
@@ -476,10 +540,13 @@ class ConfigFactory:
             "larger_batch_multi_epoch": get_larger_batch_multi_epoch_config,
             "residual_model": get_residual_model_config,
             "sage_model": get_sage_model_config,
+            "sage_model_decisive": get_sage_model_decisive_config,
             "transformer_model": get_transformer_model_config,
             "residual_low_entropy": get_residual_low_entropy_config,
             "residual_percentage": get_residual_percentage_config,
             "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
+            "residual_percentage_boosted_learning": get_residual_percentage_boosted_learning_config,
+            "residual_percentage_unclipped_gradients": get_residual_percentage_unclipped_gradients_config,
         }
         
         if config_name not in configs:
@@ -510,7 +577,7 @@ class ConfigFactory:
     @staticmethod
     def list_available() -> list[str]:
         """List all available pre-defined configurations"""
-        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage", "residual_percentage_fixed_gradients"]
+        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "sage_model_decisive", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage", "residual_percentage_fixed_gradients", "residual_percentage_boosted_learning", "residual_percentage_unclipped_gradients"]
 
 
 def get_residual_model_config() -> TrainingConfig:
@@ -638,30 +705,87 @@ def get_sage_model_config() -> TrainingConfig:
     # Model settings
     config.model.model_type = "sage"
     config.model.embed_dim = 64
-    
+
     # PPO settings optimized for SAGE
-    config.ppo.learning_rate = 5e-5
+    # Entropy coefficients tuned for 4 army options
+    config.ppo.entropy_coeff_start = 0.05
+    config.ppo.entropy_coeff_decay = 0.04
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1  # Balanced for 4 options
+
+    # Value and advantage settings
+    config.ppo.value_loss_coeff = 0.5  # Higher due to residual stability
+    config.ppo.max_grad_norm = 1.0
+    config.ppo.adaptive_epochs = True
+    config.ppo.kl_threshold = 0.02
+
+    # Early stopping
+    config.ppo.early_stopping_enabled = True
+    config.ppo.patience = 3
+    config.ppo.min_improvement = 0.01
+
+    # Verification
+    config.verification.enabled = True
+    config.verification.gradient_norm_threshold = 1000.0
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    config.verification.verify_gae_computation = False
+    config.verification.verify_model_outputs = False
+
+    # Logging
+    config.logging.experiment_name = "sage_model_stable"
+    config.logging.log_frequency = 50
+
+    return config
+
+
+def get_sage_model_decisive_config() -> TrainingConfig:
+    """SAGE model configuration with reduced army entropy for decisive learning"""
+    config = TrainingConfig()
+    
+    # Model settings
+    config.model.model_type = "sage"
+    config.model.embed_dim = 64
+
+    # PPO settings optimized for SAGE with proper army entropy
+    config.ppo.learning_rate = 1e-4
     config.ppo.ppo_epochs = 2
     config.ppo.batch_size = 32
-    config.ppo.gradient_clip_norm = 1.0
-    config.ppo.value_loss_coeff = 0.15
-    config.ppo.value_clip_range = 0.25
+    config.ppo.gradient_clip_norm = 5.0  # Slightly higher for SAGE
+    config.ppo.value_loss_coeff = 0.5
     config.ppo.clip_eps = 0.2
     config.ppo.gamma = 0.99
     config.ppo.lam = 0.95
     
+    # Fixed entropy coefficients - properly scaled for 4 army options!
+    config.ppo.entropy_coeff_start = 0.05
+    config.ppo.entropy_coeff_decay = 0.04
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 0.2  # Moderate placement exploration
+    config.ppo.edge_entropy_coeff = 0.3      # Moderate edge exploration  
+    config.ppo.army_entropy_coeff = 0.05     # Scaled properly: 1.0 × (2.0/5.64) × base_factor
+
+    # Adaptive training
+    config.ppo.adaptive_epochs = True
+
     # Verification
     config.verification.enabled = True
-    config.verification.gradient_norm_threshold = 500.0
     config.verification.detailed_logging = True
     config.verification.batch_verification_enabled = False
-    
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+
     # Logging
-    config.logging.experiment_name = "sage_model_stable"
-    config.logging.log_frequency = 50
+    config.logging.experiment_name = "sage_model_decisive"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 50
     
     return config
-
 
 
 def get_transformer_model_config() -> TrainingConfig:
@@ -788,5 +912,53 @@ def get_residual_percentage_config() -> TrainingConfig:
     # Logging
     config.logging.experiment_name = "residual_percentage_4options"
     config.logging.log_frequency = 50
+    
+    return config
+
+
+def get_residual_percentage_unclipped_gradients_config() -> TrainingConfig:
+    """Configuration with minimal gradient clipping to allow natural gradient flow"""
+    config = TrainingConfig()
+    
+    # Model settings with percentage-based army selection
+    config.model.model_type = "residual"  # Use stable residual model
+    config.model.embed_dim = 64
+    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
+    config.model.max_army_send = 50  # Kept for backward compatibility
+    
+    # PPO settings with MUCH higher gradient clipping
+    config.ppo.learning_rate = 5e-4  # Higher learning rate from previous config
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 100.0  # MUCH higher - allow natural gradients!
+    config.ppo.value_loss_coeff = 0.2
+    config.ppo.value_clip_range = 0.3
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # Entropy coefficients - moderate to allow exploration
+    config.ppo.entropy_coeff_start = 0.01
+    config.ppo.entropy_coeff_decay = 0.1
+    config.ppo.entropy_decay_episodes = 5000
+    config.ppo.placement_entropy_coeff = 0.2
+    config.ppo.edge_entropy_coeff = 0.3
+    config.ppo.army_entropy_coeff = 0.1
+    
+    # Adaptive training
+    config.ppo.adaptive_epochs = True
+    
+    # Verification and monitoring
+    config.verification.enabled = True
+    config.verification.detailed_logging = True
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    
+    # Logging
+    config.logging.experiment_name = "residual_percentage_unclipped_gradients"
+    config.logging.verbose_losses = True
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
     
     return config
