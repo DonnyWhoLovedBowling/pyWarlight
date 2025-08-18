@@ -17,6 +17,7 @@ from src.game.Phase import Phase
 import random, datetime
 from datetime import datetime
 from multipledispatch import dispatch
+from statistics import mean, stdev
 
 from src.game.move.Move import Move
 
@@ -32,14 +33,13 @@ def manual_round(d: float, most_likely: bool) -> int:
 
 
 @dataclass
-class \
-        Game:
+class Game:
     config: GameConfig
     world: World
     armies: list[int] = field(default_factory=lambda: [])
     round: int = 0
     turn: int = 0
-    phase: Phase = field(default_factory=lambda: [])
+    phase: Phase = Phase.STARTING_REGION
     score: list[int] = field(default_factory=lambda: [])
     pickable_regions: list[Region] = field(default_factory=lambda: [])
     proximity_map: dict[int] = field(default_factory=dict)
@@ -468,26 +468,34 @@ class \
         all_armies = sum(self.armies)
         for r in self.world.regions:
             own_armies = self.get_armies(r)
-            x_list = [0] * (self.config.num_players + 5)
+            x_list = [0] * (self.config.num_players + 15)
             owner = self.get_owner(r)
             if owner == -1:
                 owner_ix = 2
             else:
                 owner_ix = owner - 1
             x_list[owner_ix] = 1
-            x_list[-4] = own_armies/all_armies
-            allied_armies = 0
-            enemy_armies = 0
-            for n in r.get_neighbours():
-                if self.is_enemy_border(n):
-                    enemy_armies += self.get_armies(n)
-                else:
-                    allied_armies += self.get_armies(n)
+            x_list[r.get_continent().get_id()+3] = 1
 
+            my_armies = [self.get_armies(r) for r in self.regions_owned_by(owner)]
+            enemy_armies = [self.get_armies(r) for r in self.world.regions if self.get_owner(r) != owner]
+            my_mean = mean(my_armies) if my_armies else 0
+            my_std = stdev(my_armies) if len(my_armies) > 1 else 1
+            cont_regions = r.get_continent().get_regions()
+            my_cont_regions = [c for c in cont_regions if self.get_owner(c) == owner]
+            x_list[-8] = r.get_continent().get_reward()
+            x_list[-7] = len(my_cont_regions)/len(cont_regions)
+            x_list[-6] = (own_armies - my_mean) / my_std if my_std > 0 else 1
+            x_list[-5] = math.log1p(own_armies)
+            x_list[-4] = own_armies/all_armies
+            allied_armies = sum(my_armies)
+            enemy_armies = sum(enemy_armies)
+            all_armies = allied_armies + enemy_armies
             x_list[-3] = self.proximity_to_nearest_enemy(r)
-            x_list[-2] = enemy_armies/sum(self.armies)
-            x_list[-1] = allied_armies/sum(self.armies)
+            x_list[-2] = enemy_armies / all_armies if all_armies > 0 else 0
+            x_list[-1] = allied_armies / all_armies if all_armies > 0 else 0
             graph.append(x_list)
+            
         if self.phase == Phase.END_MOVE:
             self.end_features = graph
         if self.phase == Phase.ATTACK_TRANSFER:
@@ -498,14 +506,51 @@ class \
             raise ValueError(f"Unsupported phase for node features: {self.phase}")   
         return graph
 
+    def create_edge_features(self) -> list[list[int]]:
+        """
+        Creates a padded list of edge features for all possible action edges.
+        Each inner list corresponds to the features for one edge in self.action_edges.
+        Pads to 166 edges if necessary.
+        You can fill in your own feature logic inside the loop.
+        """
+        edge_features = []
+        action_edges = self.create_action_edges()
+        for src_id, tgt_id in action_edges:
+            if src_id == -1 or tgt_id == -1:
+                # If the region is not owned by the current player or has no armies, add a self-loop
+                features = [0, 0, 0, 0, 0]
+            else:
+                all_armies = sum(self.armies)
+                src_region = self.world.regions[src_id]
+                tgt_region = self.world.regions[tgt_id]
+                src_owner = self.get_owner(src_region)
+                is_self = src_id = tgt_id
+                is_attack = src_owner != self.get_owner(tgt_region)
+                army_balance = self.get_armies(src_region) / self.get_armies(tgt_region)
+                rel_army_difference = (self.get_armies(src_region) - self.get_armies(tgt_region))/all_armies
+                src_cont = src_region.get_continent()
+                cont_regions = src_cont.get_regions()
+                my_cont_regions = [c for c in cont_regions if self.get_owner(c) == src_owner]
+
+                conquers_continent = ((len(cont_regions) - len(my_cont_regions) == 1) and
+                                      tgt_region.get_continent() == src_region.get_continent())
+                # Create features for the edge
+
+                features = [int(is_attack), int(is_self), army_balance, rel_army_difference, int(conquers_continent)]  # e.g., [src_id, tgt_id] or custom features
+            edge_features.append(features)
+        return edge_features
+
     def create_action_edges(self) -> list[list[int]]:
         if len(self.action_edges) > 0:
             return self.action_edges
-        for src in self.regions_owned_by(self.turn):
-            if self.get_armies(src) > 1:
-                for tgt in src.get_neighbours():
+        for src in self.world.regions:
+            can_attack = self.get_owner(src) == self.turn and self.get_armies(src) > 1
+            for tgt in src.get_neighbours():
+                if can_attack:
                     self.action_edges.append([src.get_id(), tgt.get_id()])
-                self.action_edges.append([src.get_id(), src.get_id()])
+                else:
+                    # If the region is not owned by the current player or has no armies, add a padding
+                    self.action_edges.append([-1, -1])
         return self.action_edges
 
     def end_move(self, agent: AgentBase):

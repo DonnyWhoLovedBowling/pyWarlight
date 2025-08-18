@@ -28,9 +28,10 @@ class ModelFactory:
         node_feat_dim=config.model.in_channels
         embed_dim=config.model.embed_dim
         n_army_options=getattr(config.model, 'n_army_options', 4)  # Default to 4 if not specified
+        edge_feat_dim = getattr(config.model, 'edge_feat_dim', 0)
 
         if model_type == 'standard':
-            return WarlightPolicyNet(node_feat_dim, embed_dim, n_army_options)
+            return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, n_army_options=n_army_options, edge_feat_dim=edge_feat_dim)
         
         elif model_type == 'residual':
             return WarlightPolicyNetResidual(node_feat_dim, embed_dim, n_army_options)
@@ -39,8 +40,8 @@ class ModelFactory:
             return WarlightPolicyNetSAGE(node_feat_dim, embed_dim, n_army_options)
         
         elif model_type == 'transformer':
-            return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, n_army_options=n_army_options)
-        
+            return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, n_army_options=n_army_options, edge_feat_dim=edge_feat_dim)
+
         else:
             raise ValueError(f"Unknown model type: {model_type}")
     

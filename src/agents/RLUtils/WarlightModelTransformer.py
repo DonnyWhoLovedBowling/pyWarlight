@@ -3,6 +3,7 @@ import torch.nn.functional as f
 import torch.nn as nn
 import math
 from src.game.Phase import Phase
+from torch.utils.tensorboard import SummaryWriter
 
 class PositionalEncoding(nn.Module):
     """Add positional encoding based on region coordinates"""
@@ -50,7 +51,11 @@ class StableMultiHeadAttention(nn.Module):
         
         # Apply adjacency mask if provided (only attend to neighboring regions)
         if adjacency_mask is not None:
-            scores = scores.masked_fill(~adjacency_mask.unsqueeze(1).unsqueeze(1), -1e9)
+            # adjacency_mask is [batch_size, seq_len, seq_len]
+            # scores is [batch_size, num_heads, seq_len, seq_len]
+            # Need to add head dimension to adjacency_mask: [batch_size, 1, seq_len, seq_len]
+            expanded_mask = adjacency_mask.unsqueeze(1)
+            scores = scores.masked_fill(~expanded_mask, -1e9)
         
         attn_weights = f.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -68,8 +73,8 @@ class TransformerBlock(nn.Module):
         ff_dim = ff_dim or 2 * embed_dim
         
         self.attention = StableMultiHeadAttention(embed_dim, num_heads, dropout)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.RMSNorm(embed_dim)
+        self.norm2 = nn.RMSNorm(embed_dim)
         
         self.ff = nn.Sequential(
             nn.Linear(embed_dim, ff_dim),
@@ -90,76 +95,106 @@ class TransformerBlock(nn.Module):
         
         return x
 
+class EdgeTransformerBlock(nn.Module):
+    """Edge transformer block for edge embeddings"""
+    def __init__(self, input_dim, embed_dim, num_heads=2, dropout=0.1):
+        super().__init__()
+        self.attention = StableMultiHeadAttention(input_dim, num_heads, dropout)
+        self.norm1 = nn.RMSNorm(input_dim)
+        self.norm2 = nn.RMSNorm(input_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(input_dim, embed_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, embed_dim),
+            nn.Dropout(dropout)
+        )
+        self.out_norm = nn.RMSNorm(embed_dim)
+
+    def forward(self, x):
+        # Self-attention with residual connection
+        attn_out, _ = self.attention(self.norm1(x))
+        x = x + attn_out
+        # Feedforward with residual connection
+        ff_out = self.ff(self.norm2(x))
+        x = ff_out + x[..., :ff_out.shape[-1]]  # Residual, crop if needed
+        x = self.out_norm(x)
+        return x
+
+
+def create_adjacency_mask(batch_size, num_nodes, edge_index, device):
+    """Create adjacency mask for attention (only attend to neighbors)"""
+    adj_mask = torch.zeros(batch_size, num_nodes, num_nodes, dtype=torch.bool, device=device)
+
+    # Allow self-attention
+    for i in range(num_nodes):
+        adj_mask[:, i, i] = True
+
+    # Allow attention to neighbors
+    if edge_index.numel() > 0:
+        src, tgt = edge_index
+        adj_mask[:, src, tgt] = True
+        adj_mask[:, tgt, src] = True  # Undirected graph
+
+    return adj_mask
+
+
 class WarlightPolicyNetTransformer(nn.Module):
     """Transformer-based Warlight policy network"""
-    def __init__(self, node_feat_dim, embed_dim=64, num_heads=4, num_layers=3, n_army_options=4):
+    def __init__(self, node_feat_dim, embed_dim=64, num_heads=4, num_layers=3, n_army_options=4, edge_feat_dim=0, writer=None, global_step=0):
         super().__init__()
-        
+        self.n_army_options = n_army_options
+        self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
+        self.edge_tensor: torch.Tensor = None
+
         # Input projection
         self.input_proj = nn.Linear(node_feat_dim, embed_dim)
         self.pos_encoding = PositionalEncoding(embed_dim)
-        
+
         # Transformer layers
         self.transformer_layers = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout=0.1)
             for _ in range(num_layers)
         ])
-        
+
+        # Edge transformer layers
+        self.edge_transformer_layers = nn.ModuleList([
+            EdgeTransformerBlock(embed_dim, embed_dim, num_heads=2, dropout=0.1)
+            for _ in range(num_layers)
+        ])
+
         # Output heads - much simpler than GNN versions
         self.placement_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
+            nn.RMSNorm(embed_dim),
             nn.Linear(embed_dim, 32),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(32, 1)
         )
-        
-        # Attack head - use attention to score edge importance
-        self.edge_attention = StableMultiHeadAttention(embed_dim, num_heads=2)
+        # Correct input sizes for all layers using edge features
+        self.edge_input_proj = nn.Linear(2 * embed_dim + edge_feat_dim, embed_dim)
         self.edge_scorer = nn.Sequential(
-            nn.LayerNorm(2 * embed_dim),
-            nn.Linear(2 * embed_dim, 64),
+            nn.RMSNorm(embed_dim),
+            nn.Linear(embed_dim, 64),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 1)
         )
-        
         self.army_scorer = nn.Sequential(
-            nn.LayerNorm(2 * embed_dim),
-            nn.Linear(2 * embed_dim, 32),
+            nn.RMSNorm(embed_dim),
+            nn.Linear(embed_dim, 32),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(32, n_army_options)
         )
-        
-        # Very small value head for stability
         self.value_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
+            nn.RMSNorm(embed_dim),
             nn.Linear(embed_dim, 16),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(16, 1)
         )
-        
-        self.n_army_options = n_army_options
-        self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
-        self.edge_tensor: torch.Tensor = None
-        
-    def create_adjacency_mask(self, batch_size, num_nodes, edge_index, device):
-        """Create adjacency mask for attention (only attend to neighbors)"""
-        adj_mask = torch.zeros(batch_size, num_nodes, num_nodes, dtype=torch.bool, device=device)
-        
-        # Allow self-attention
-        for i in range(num_nodes):
-            adj_mask[:, i, i] = True
-            
-        # Allow attention to neighbors
-        if edge_index.numel() > 0:
-            src, tgt = edge_index
-            adj_mask[:, src, tgt] = True
-            adj_mask[:, tgt, src] = True  # Undirected graph
-            
-        return adj_mask
+
 
     def get_node_embeddings(self, x, edge_index):
         """Process node features through transformer layers"""
@@ -168,47 +203,98 @@ class WarlightPolicyNetTransformer(nn.Module):
             squeeze_output = True
         else:
             squeeze_output = False
-            
+
         batch_size, num_nodes, _ = x.shape
-        
+
         # Input projection and positional encoding
         x = self.input_proj(x)
         x = self.pos_encoding(x)
-        
+
         # Create adjacency mask for local attention
-        adj_mask = self.create_adjacency_mask(batch_size, num_nodes, edge_index, x.device)
-        
+        adj_mask = create_adjacency_mask(batch_size, num_nodes, edge_index, x.device)
+
         # Process through transformer layers
         for layer in self.transformer_layers:
             x = layer(x, adj_mask)
             # Clip embeddings after each layer
             x = torch.clamp(x, min=-3.0, max=3.0)
-        
+
         if squeeze_output:
             x = x.squeeze(0)
-            
+
         return x
 
-    def get_value(self, node_features: torch.Tensor):
+    def get_edge_embeddings(self, edge_features, node_embeddings):
+        """
+        Attention-based edge feature embeddings with transformer blocks.
+        edge_features: [batch_size, num_edges, edge_feat_dim]
+        node_embeddings: [batch_size, num_nodes, embed_dim]
+        Returns: [batch_size, num_edges, embed_dim]
+        """
+        if edge_features.dim() == 2:
+            edge_features = edge_features.unsqueeze(0)
+            node_embeddings = node_embeddings.unsqueeze(0) # Add batch dimension
+            squeeze_output = True
+        else:
+            squeeze_output = False
+
+        batch_size, num_edges, _ = edge_features.shape
+
+        src = self.edge_tensor[0]
+        tgt = self.edge_tensor[1]
+
+        src_embed = node_embeddings[:, src, :].clone()
+        tgt_embed = node_embeddings[:, tgt, :].clone()
+
+        edge_input = torch.cat([src_embed, tgt_embed, edge_features], dim=-1)
+        edge_input = self.edge_input_proj(edge_input)  # Project to embed_dim
+        # Process through edge transformer layers
+        for layer in self.edge_transformer_layers:
+            edge_input = layer(edge_input)
+            edge_input = torch.clamp(edge_input, min=-3.0, max=3.0)
+        if squeeze_output:
+            edge_input = edge_input.squeeze(0)
+        return edge_input
+
+    def get_value(self, node_features: torch.Tensor, edge_features: torch.Tensor, writer: SummaryWriter = None, game_number: int = 0):
+        """
+        predict value from node features and edge features.
+        """
         if self.edge_tensor is None:
             # Fallback: create empty edge tensor
             edge_tensor = torch.empty((2, 0), dtype=torch.long, device=node_features.device)
         else:
             edge_tensor = self.edge_tensor.to(node_features.device)
-            
+
         node_embeddings = self.get_node_embeddings(node_features, edge_tensor)
-        
-        if node_embeddings.dim() == 2:
-            graph_embedding = node_embeddings.mean(dim=0)
+        graph_embedding = self.get_edge_embeddings(edge_features, node_embeddings)
+        if graph_embedding.dim() == 2:
+            graph_embedding = graph_embedding.mean(dim=0)
         else:
-            graph_embedding = node_embeddings.mean(dim=1)
-        
+            graph_embedding = graph_embedding.mean(dim=1)
+                # TensorBoard logging for graph embedding
+            if game_number % 10 == 0 and writer is not None:
+                step = getattr(self, 'global_step', 0)
+                writer.add_histogram('graph_embedding', graph_embedding, game_number)
+
         value = self.value_head(graph_embedding)
         # Conservative value clipping
         value = torch.clamp(value, min=-30.0, max=30.0)
         return value.squeeze(-1)
 
-    def forward(self, x, action_edges, action: str=None, edge_mask=None):
+    def forward(self, x, action_edges, action: str=None, edge_mask=None, edge_features=None):
+        """
+        Forward pass through the transformer model.
+        x: Node features tensor of shape [batch_size, num_nodes, node_feat_dim]
+        action_edges: Edge indices tensor of shape [batch_size, num_edges, 2]
+        action: Current game phase (e.g., Phase.PLACE_ARMIES, Phase.ATTACK_TRANSFER)
+        edge_mask: Optional mask for edges to consider (shape [batch_size, num_edges])
+        edge_features: Optional edge features tensor of shape [batch_size, num_edges, edge_feat_dim]
+        Returns:
+            placement_logits: Logits for placement actions
+            attack_logits: Logits for attack actions
+            army_logits: Logits for army options in attack actions
+        """
         if self.edge_tensor is None:
             edge_tensor = torch.empty((2, 0), dtype=torch.long, device=x.device)
         else:
@@ -241,28 +327,15 @@ class WarlightPolicyNetTransformer(nn.Module):
                 
             if node_embeddings.dim() == 2:
                 node_embeddings = node_embeddings.unsqueeze(0)
-                
+            if edge_features.dim() == 2:
+                edge_features = edge_features.unsqueeze(0)
+
+
             num_edges = action_edges.shape[-2]
-            embed_dim = node_embeddings.shape[-1]
-            num_nodes = node_embeddings.shape[-2]
-            
-            src = torch.clamp(action_edges[..., 0], min=0, max=num_nodes - 1)
-            tgt = torch.clamp(action_edges[..., 1], min=0, max=num_nodes - 1)
-            
-            # Gather embeddings for edge endpoints
-            src_embed = torch.gather(node_embeddings, 1, 
-                                   src.unsqueeze(-1).expand(-1, -1, embed_dim))
-            tgt_embed = torch.gather(node_embeddings, 1,
-                                   tgt.unsqueeze(-1).expand(-1, -1, embed_dim))
-            
-            edge_embed = torch.cat([src_embed, tgt_embed], dim=-1)
-            edge_embed_flat = edge_embed.view(-1, 2 * embed_dim)
-            
-            # Conservative clipping
-            edge_embed_flat = torch.clamp(edge_embed_flat, min=-2.0, max=2.0)
-            
-            attack_logits_flat = self.edge_scorer(edge_embed_flat).squeeze(-1)
-            army_logits_flat = self.army_scorer(edge_embed_flat)
+
+            edge_embeddings = self.get_edge_embeddings(edge_features, node_embeddings)
+            attack_logits_flat = self.edge_scorer(edge_embeddings).squeeze(-1)
+            army_logits_flat = self.army_scorer(edge_embeddings)
             
             attack_logits = attack_logits_flat.view(batch_size, num_edges)
             army_logits = army_logits_flat.view(batch_size, num_edges, self.n_army_options)

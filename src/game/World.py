@@ -67,10 +67,6 @@ class World:
                     froms.append(_from)
                     tos.append(_to)
                     region_map[_from].add_neighbour(region_map[_to])
-                    region_map[_to].add_neighbour(region_map[_from])
-            dummy_froms = froms.copy()
-            froms += tos
-            tos += dummy_froms
             self.torch_edge_list.append(froms)
             self.torch_edge_list.append(tos)
         else:

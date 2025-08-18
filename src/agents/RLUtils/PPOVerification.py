@@ -319,7 +319,7 @@ class PPOVerifier:
         }
         
         # Print analysis if enabled
-        if self.config.detailed_logging:
+        if self.config.detailed_logging or 0.1 > total_norm or total_norm > 10:
             print(f"\n=== GRADIENT ANALYSIS ===")
             print(f"Total gradient norm: {total_norm:.6f}")
             print(f"Parameters with NaN gradients: {nan_params}")
@@ -382,7 +382,7 @@ class PPOVerifier:
         
         return grad_stats
     
-    def analyze_weight_changes(self, model, prev_weights, agent):
+    def analyze_weight_changes(self, model, prev_weights = None, agent = None):
         """
         Track how much model weights are changing between updates
         """
@@ -415,7 +415,7 @@ class PPOVerifier:
                 total_weight_norm += weight_norm ** 2
                 
                 # Print significant changes
-                if self.config.detailed_logging:
+                if self.config.detailed_logging or agent.game_number % 10 == 0:
                     if relative_change > 0.1:  # More than 10% change
                         print(f"  {name}: {relative_change:.4f} relative change (large)")
                     elif relative_change < 1e-6:  # Very small change

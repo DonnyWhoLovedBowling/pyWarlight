@@ -12,7 +12,9 @@
                 "-sim",
                 "10000",
                 "-map",
-                "World"
+                "World",
+                "-config",
+                "transformer_large_high_entropy"
             ],
             "console": "integratedTerminal"
         }

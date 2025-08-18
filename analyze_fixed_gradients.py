@@ -78,8 +78,8 @@ def analyze_gradient_recovery(data):
     for metric in gradient_metrics:
         df = data[metric]
         if len(df) > 100:  # Need decent amount of data
-            recent_mean = df.tail(500)['value'].mean()
-            early_mean = df.head(500)['value'].mean()
+            recent_mean = df.tail(10)['value'].mean()
+            early_mean = df.head(10)['value'].mean()
             overall_mean = df['value'].mean()
             max_val = df['value'].max()
             min_val = df['value'].min()
@@ -102,6 +102,52 @@ def analyze_gradient_recovery(data):
                     print(f"   🔍 Gradient norms moderate - may need investigation")
     
     return None
+
+def analyze_gradient_cv(data):
+    """Analyze gradient coefficient of variation (cv) metrics"""
+    print("\n📊 === GRADIENT CV ANALYSIS ===")
+    cv_metrics = [tag for tag in data.keys() if 'grad_cv' in tag.lower() or 'gradient_cv' in tag.lower()]
+    if not cv_metrics:
+        print("❌ No gradient CV metrics found!")
+        return
+    print(f"Found gradient CV metrics: {cv_metrics}")
+    for metric in cv_metrics:
+        df = data[metric]
+        if len(df) > 100:
+            recent_mean = df.tail(10)['value'].mean()
+            early_mean = df.head(10)['value'].mean()
+            overall_mean = df['value'].mean()
+            print(f"\n📈 {metric}:")
+            print(f"   Early mean: {early_mean:.4f}")
+            print(f"   Recent mean: {recent_mean:.4f}")
+            print(f"   Overall mean: {overall_mean:.4f}")
+            if overall_mean > 2.0:
+                print(f"   ⚠️  HIGH CV: Possible instability or poor gradient flow")
+            else:
+                print(f"   ✅ CV trend looks reasonable")
+
+def analyze_weight_change(data):
+    """Analyze weight change metrics"""
+    print("\n🔄 === WEIGHT CHANGE ANALYSIS ===")
+    weight_metrics = [tag for tag in data.keys() if 'weight_change' in tag.lower() or 'weights_delta' in tag.lower()]
+    if not weight_metrics:
+        print("❌ No weight change metrics found!")
+        return
+    print(f"Found weight change metrics: {weight_metrics}")
+    for metric in weight_metrics:
+        df = data[metric]
+        if len(df) > 100:
+            recent_mean = df.tail(10)['value'].mean()
+            early_mean = df.head(10)['value'].mean()
+            overall_mean = df['value'].mean()
+            print(f"\n📈 {metric}:")
+            print(f"   Early mean: {early_mean:.6f}")
+            print(f"   Recent mean: {recent_mean:.6f}")
+            print(f"   Overall mean: {F:.6f}")
+            if overall_mean < 1e-6:
+                print(f"   ⚠️  Very low weight change: Possible stagnation")
+            else:
+                print(f"   ✅ Weight change trend looks reasonable")
 
 def analyze_win_rate_pattern(data):
     """Analyze win rate and performance patterns"""
@@ -126,8 +172,8 @@ def analyze_win_rate_pattern(data):
     for metric in found_metrics:
         df = data[metric]
         if len(df) > 100:
-            recent_mean = df.tail(1000)['value'].mean()
-            early_mean = df.head(1000)['value'].mean()
+            recent_mean = df.tail(100)['value'].mean()
+            early_mean = df.head(100)['value'].mean()
             overall_mean = df['value'].mean()
             
             print(f"\n📊 {metric}:")
@@ -164,8 +210,8 @@ def analyze_training_stability(data):
     for metric in found_metrics:
         df = data[metric]
         if len(df) > 100:
-            recent_values = df.tail(1000)['value']
-            early_values = df.head(1000)['value']
+            recent_values = df.tail(100)['value']
+            early_values = df.head(100)['value']
             
             recent_mean = recent_values.mean()
             recent_std = recent_values.std()
@@ -201,8 +247,8 @@ def analyze_zero_gradient_params(data):
     for metric in zero_grad_metrics:
         df = data[metric]
         if len(df) > 100:
-            recent_mean = df.tail(1000)['value'].mean()
-            early_mean = df.head(1000)['value'].mean()
+            recent_mean = df.tail(100)['value'].mean()
+            early_mean = df.head(100)['value'].mean()
             max_val = df['value'].max()
             
             print(f"\n🎯 {metric}:")
@@ -239,9 +285,9 @@ def diagnose_failure_mode(data):
     if performance_metrics:
         for metric in performance_metrics:
             df = data[metric]
-            if len(df) > 1000:
-                early = df.head(500)['value'].mean()
-                late = df.tail(500)['value'].mean()
+            if len(df) > 100:
+                early = df.head(10)['value'].mean()
+                late = df.tail(10)['value'].mean()
                 
                 if abs(late - early) < 0.01:  # No improvement
                     print("🔍 HYPOTHESIS 2: Learning rate too low or model capacity issue")
@@ -254,7 +300,7 @@ def diagnose_failure_mode(data):
     if entropy_metrics:
         for metric in entropy_metrics:
             df = data[metric]
-            recent_entropy = df.tail(500)['value'].mean()
+            recent_entropy = df.tail(10)['value'].mean()
             
             if recent_entropy < 0.1:
                 print("🔍 HYPOTHESIS 3: Entropy collapse - policy too deterministic")
@@ -266,51 +312,17 @@ def diagnose_failure_mode(data):
     return "unknown"
 
 def main():
-    log_file = "analysis/logs/residual_percentage_boosted_learning/events.out.tfevents.1755071374.Deskie.21652.1"
-    
-    print("🔍 Analyzing residual_percentage_boosted_learning run (72 episodes)...")
-    print("=" * 70)
-    
-    # Load and analyze data
-    data = analyze_tensorboard_logs(log_file)
-    
+    log_file_path = r"C:\Users\pcvan\Projects\pyWarlight\analysis\logs\transformer_decisive_experiment\events.out.tfevents.1755094237.Deskie.12024.1"
+    data = analyze_tensorboard_logs(log_file_path)
     if data is None:
-        print("❌ Failed to load TensorBoard data")
+        print("❌ Could not analyze log file.")
         return
-    
-    print(f"\n📋 Available metrics: {len(data)} total")
-    for tag in sorted(data.keys()):
-        df = data[tag]
-        print(f"   📊 {tag}: {len(df)} data points")
-    
-    # Run analyses
-    gradient_recovered = analyze_gradient_recovery(data)
+    analyze_gradient_recovery(data)
+    analyze_gradient_cv(data)
+    analyze_weight_change(data)
     analyze_win_rate_pattern(data)
     analyze_training_stability(data)
     analyze_zero_gradient_params(data)
-    failure_mode = diagnose_failure_mode(data)
-    
-    # Summary and recommendations
-    print("\n" + "=" * 70)
-    print("🎯 === SUMMARY AND RECOMMENDATIONS ===")
-    
-    if gradient_recovered is False:
-        print("❌ PRIMARY ISSUE: Gradients did not recover as expected")
-        print("🔧 RECOMMENDED FIX: Increase gradient_clip_norm to 25.0 or 50.0")
-    elif failure_mode == "learning_rate":
-        print("❌ PRIMARY ISSUE: Learning rate appears too low")
-        print("🔧 RECOMMENDED FIX: Increase learning_rate to 5e-4 or 1e-3")
-    elif failure_mode == "entropy_collapse":
-        print("❌ PRIMARY ISSUE: Policy became too deterministic")
-        print("🔧 RECOMMENDED FIX: Increase entropy coefficients")
-    else:
-        print("🤔 Complex failure - multiple factors may be involved")
-        print("🔧 RECOMMENDED APPROACH: Try more aggressive gradient settings first")
-    
-    print("\n🆕 Suggested next config:")
-    print("   - gradient_clip_norm = 25.0 (or higher)")
-    print("   - learning_rate = 2e-4 (double current)")
-    print("   - Monitor gradient norms closely")
 
 if __name__ == "__main__":
     main()

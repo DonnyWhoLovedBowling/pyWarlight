@@ -14,7 +14,10 @@
                 "-sim",
                 "10000",
                 "-map",
-                "World"
+                "world",
+                "-config",
+                "transformer_large_high_entropy"
+
             ],
             "group": {
                 "kind": "build",

@@ -23,7 +23,7 @@ class CheckpointManager:
         self.base_checkpoint_dir = os.path.join(config.logging.log_dir, "checkpoints")
         self.checkpoint_dir = os.path.join(self.base_checkpoint_dir, experiment_name)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        
+        self.is_saved = False
         # Configuration
         self.save_frequency = config.logging.checkpoint_every_n_episodes
         self.keep_last_n = getattr(config.logging, 'keep_last_n_checkpoints', 5)
@@ -34,7 +34,11 @@ class CheckpointManager:
     
     def should_save_checkpoint(self, game_number: int) -> bool:
         """Check if we should save a checkpoint at this game number"""
-        return game_number % self.save_frequency == 0
+        if game_number % self.save_frequency == 0:
+            return not self.is_saved
+        else:
+            self.is_saved = False
+            return False
     
     def find_latest_checkpoint(self, experiment_name: Optional[str] = None) -> Optional[str]:
         """Find the latest checkpoint for an experiment"""
@@ -62,7 +66,7 @@ class CheckpointManager:
         """Save comprehensive checkpoint"""
         if not force and not self.should_save_checkpoint(game_number):
             return None
-            
+        self.is_saved = True
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_filename = f"checkpoint_game_{game_number}_{timestamp}.pth"
         checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_filename)
@@ -118,7 +122,9 @@ class CheckpointManager:
             return False
             
         try:
-            checkpoint_data = torch.load(checkpoint_path, map_location=agent.model.device)
+            # Get device from the agent (which properly handles model device detection)
+            device = getattr(agent, 'device', 'cpu')
+            checkpoint_data = torch.load(checkpoint_path, map_location=device, weights_only=False)
             print(f"📂 Loading checkpoint: {os.path.basename(checkpoint_path)}")
             print(f"   Saved at game: {checkpoint_data.get('game_number', 'unknown')}")
             print(f"   Timestamp: {checkpoint_data.get('timestamp', 'unknown')}")

@@ -14,7 +14,7 @@ import os
 @dataclass 
 class ModelConfig:
     """Configuration for the neural network model"""
-    in_channels: int = 7
+    in_channels: int = 17
     hidden_channels: int = 64
     embed_dim: int = 64
     max_army_send: int = 50  # Deprecated: kept for backward compatibility
@@ -23,6 +23,7 @@ class ModelConfig:
     
     # Model architecture selection
     model_type: str = 'standard'  # 'standard', 'residual', 'sage', 'transformer'
+    edge_feat_dim: int = 5  # Number of edge features (default 0 for backward compatibility)
     
     def get_device(self) -> torch.device:
         """Get the actual torch device"""
@@ -116,8 +117,8 @@ class LoggingConfig:
     # Model checkpointing
     save_checkpoints: bool = True                 # Enable model checkpointing
     checkpoint_dir: str = "res/model"             # Directory for saving checkpoints
-    checkpoint_every_n_episodes: int = 100       # Save checkpoint every N episodes
-    keep_last_n_checkpoints: int = 5             # Number of checkpoints to keep
+    checkpoint_every_n_episodes: int = 500       # Save checkpoint every N episodes
+    keep_last_n_checkpoints: int = 25             # Number of checkpoints to keep
     
     # Checkpoint resuming
     resume_from_checkpoint: bool = False          # Whether to resume from a checkpoint
@@ -161,7 +162,8 @@ class GameConfig:
     win_speed_bonus: float = 10.0                 # Bonus for fast wins (max)
     win_speed_decay: float = 0.1                  # Decay rate for speed bonus
     loss_penalty: float = 50.0                    # Penalty for losing
-    
+    only_armies_used = False
+
     # Placement rewards
     placement_next_to_enemy_bonus: float = 0.1    # Bonus for placing next to enemies
     placement_safe_penalty: float = 0.05          # Penalty for placing in safe regions
@@ -178,7 +180,6 @@ class GameConfig:
     # Action sampling
     use_temperature_scaling: bool = False          # Enable temperature scaling
     temperature: float = 1.0                      # Temperature for action sampling
-
 
 @dataclass
 class TrainingConfig:
@@ -542,11 +543,13 @@ class ConfigFactory:
             "sage_model": get_sage_model_config,
             "sage_model_decisive": get_sage_model_decisive_config,
             "transformer_model": get_transformer_model_config,
+            "transformer_model_decisive": get_transformer_model_decisive_config,
+            "transformer_large_high_entropy": get_transformer_larger_balanced_entropy_config,
+            "transformer_edge_features": get_transformer_edge_features_config,
+
             "residual_low_entropy": get_residual_low_entropy_config,
-            "residual_percentage": get_residual_percentage_config,
             "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
             "residual_percentage_boosted_learning": get_residual_percentage_boosted_learning_config,
-            "residual_percentage_unclipped_gradients": get_residual_percentage_unclipped_gradients_config,
         }
         
         if config_name not in configs:
@@ -577,7 +580,16 @@ class ConfigFactory:
     @staticmethod
     def list_available() -> list[str]:
         """List all available pre-defined configurations"""
-        return ["production", "debug", "analysis", "fast_debug", "stable_learning", "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", "larger_batch_multi_epoch", "residual_model", "sage_model", "sage_model_decisive", "transformer_model", "residual_low_entropy", "reduced_army_send", "residual_percentage", "residual_percentage_fixed_gradients", "residual_percentage_boosted_learning", "residual_percentage_unclipped_gradients"]
+        return [
+            "production", "debug", "analysis", "fast_debug", "stable_learning", 
+            "optimized_stable", "conservative_multi_epoch", "value_regularized_multi_epoch", 
+            "larger_batch_multi_epoch", "residual_model", "sage_model", "sage_model_decisive", 
+            "transformer_model", "transformer_model_decisive", "transformer_high_lr",
+            "transformer_larger_model", "transformer_fixed_multi_epoch",
+            "residual_low_entropy", "reduced_army_send", "residual_percentage", 
+            "residual_percentage_fixed_gradients", "residual_percentage_boosted_learning", 
+            "residual_percentage_unclipped_gradients"
+        ]
 
 
 def get_residual_model_config() -> TrainingConfig:
@@ -633,19 +645,19 @@ def get_residual_low_entropy_config() -> TrainingConfig:
     config.ppo.ppo_epochs = 2
     config.ppo.batch_size = 32
     config.ppo.gradient_clip_norm = 1.0
-    config.ppo.value_loss_coeff = 0.2
+    config.ppo.value_loss_coeff = 0.5
     config.ppo.value_clip_range = 0.3
     config.ppo.clip_eps = 0.2
     config.ppo.gamma = 0.99
     config.ppo.lam = 0.95
     
     # Very aggressive entropy schedule for maximum decisiveness
-    config.ppo.entropy_coeff_start = 2.0  # Start very high
-    config.ppo.entropy_coeff_decay = 1.8  # Decay to near zero (90% reduction)
-    config.ppo.entropy_decay_episodes = 2000  # Very fast decay (2000 episodes)
-    config.ppo.placement_entropy_coeff = 0.5  # Very high placement entropy weight
-    config.ppo.edge_entropy_coeff = 0.8  # Very high edge entropy weight
-    config.ppo.army_entropy_coeff = 0.05  # High army entropy weight
+    config.ppo.entropy_coeff_start = 0.2  # Start very high
+    config.ppo.entropy_coeff_decay = 0.1  # Decay to near zero (90% reduction)
+    config.ppo.entropy_decay_episodes = 1000  # Very fast decay (2000 episodes)
+    config.ppo.placement_entropy_coeff = .1  # Very high placement entropy weight
+    config.ppo.edge_entropy_coeff = .1  # Very high edge entropy weight
+    config.ppo.army_entropy_coeff = .1  # High army entropy weight
     
     # Verification
     config.verification.enabled = False
@@ -820,145 +832,193 @@ def get_transformer_model_config() -> TrainingConfig:
     return config
 
 
-def get_reduced_army_options_config() -> TrainingConfig:
-    """Configuration with reduced army options for lower army entropy"""
+def get_transformer_model_decisive_config() -> TrainingConfig:
+    """Transformer model configuration based on sage_model_decisive with enhanced checkpointing"""
     config = TrainingConfig()
     
-    # Model settings with reduced army options
-    config.model.model_type = "residual"  # Use stable residual model
+    # Model settings - Transformer architecture
+    config.model.model_type = "transformer"
     config.model.embed_dim = 64
-    config.model.n_army_options = 3  # Reduced from 4 to 3 options (33%, 66%, 100%)
-    config.model.max_army_send = 15  # Kept for backward compatibility
-    
-    # PPO settings optimized for reduced action space
+
+    # PPO settings - based on sage_model_decisive but adapted for Transformer
     config.ppo.learning_rate = 1e-4
     config.ppo.ppo_epochs = 2
-    config.ppo.batch_size = 32
-    config.ppo.gradient_clip_norm = 1.0
-    config.ppo.value_loss_coeff = 0.2
-    config.ppo.value_clip_range = 0.3
+    config.ppo.batch_size = 32  # Use same batch size as other working configs
+    config.ppo.gradient_clip_norm = 5.0  # Same as sage_model_decisive
+    config.ppo.value_loss_coeff = 0.5
     config.ppo.clip_eps = 0.2
     config.ppo.gamma = 0.99
     config.ppo.lam = 0.95
     
-    # Adjusted entropy schedule - less army entropy needed due to smaller action space
-    config.ppo.entropy_coeff_start = 0.8  # Slightly lower start
-    config.ppo.entropy_coeff_decay = 0.9
-    config.ppo.entropy_decay_episodes = 5000
-    config.ppo.placement_entropy_coeff = 0.2
-    config.ppo.edge_entropy_coeff = 0.3
-    config.ppo.army_entropy_coeff = 0.1  # Reduced army entropy (was 0.01)
-    
-    # Verification
-    config.verification.enabled = True
-    config.verification.gradient_norm_threshold = 1000.0
-    config.verification.detailed_logging = False
-    config.verification.batch_verification_enabled = False
-    
-    # Logging
-    config.logging.experiment_name = "reduced_army_send_15"
-    config.logging.log_frequency = 50
-    
-    return config
-
-
-def get_residual_percentage_config() -> TrainingConfig:
-    """Configuration for residual model with 4 army percentage options"""
-    config = TrainingConfig()
-    
-    # Model settings with percentage-based army selection
-    config.model.model_type = "residual"  # Use stable residual model
-    config.model.embed_dim = 64
-    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
-    config.model.max_army_send = 50  # Kept for backward compatibility
-    
-    # PPO settings optimized for percentage-based system
-    config.ppo.learning_rate = 1e-4  # Higher LR for residual model stability
-    config.ppo.ppo_epochs = 2
-    config.ppo.batch_size = 32
-    config.ppo.clip_eps = 0.2
-    config.ppo.gamma = 0.99
-    config.ppo.lam = 0.95
-    
-    # Entropy coefficients tuned for 4 army options
+    # Fixed entropy coefficients - same as sage_model_decisive
     config.ppo.entropy_coeff_start = 0.05
     config.ppo.entropy_coeff_decay = 0.04
     config.ppo.entropy_decay_episodes = 10000
-    config.ppo.placement_entropy_coeff = 1
-    config.ppo.edge_entropy_coeff = 1
-    config.ppo.army_entropy_coeff = 1  # Balanced for 4 options
-    
-    # Value and advantage settings
-    config.ppo.value_loss_coeff = 0.5  # Higher due to residual stability
-    config.ppo.max_grad_norm = 1.0
+    config.ppo.placement_entropy_coeff = 1  # Moderate placement exploration
+    config.ppo.edge_entropy_coeff = 1      # Moderate edge exploration  
+    config.ppo.army_entropy_coeff = 1     # Properly scaled for 4 army options
+
+    # Adaptive training
     config.ppo.adaptive_epochs = True
-    config.ppo.kl_threshold = 0.02
+
+    # Enhanced checkpointing configuration
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 100  # Save every 100 episodes as requested
+    config.logging.keep_last_n_checkpoints = 10       # Keep more checkpoints for analysis
     
-    # Early stopping
-    config.ppo.early_stopping_enabled = True
-    config.ppo.patience = 3
-    config.ppo.min_improvement = 0.01
+    # Automatic resume capabilities
+    config.logging.auto_resume_latest = True
+    config.logging.resume_experiment_name = "transformer_decisive_experiment"
     
+    # Comprehensive checkpoint loading
+    config.logging.load_model_state = True
+    config.logging.load_optimizer_state = True
+    config.logging.load_reward_normalizer = True  # Critical for continued training
+    config.logging.load_game_number = True
+    config.logging.load_stat_trackers = True
+    config.logging.load_training_state = True
+
+    # Verification - same as sage_model_decisive
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = False
+
+    # Logging with specific experiment name for transformer
+    config.logging.experiment_name = "transformer_decisive_experiment"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 50
+    
+    return config
+
+
+def get_transformer_larger_high_entropy_config() -> TrainingConfig:
+    """Transformer config with larger model and high entropy coefficients for stability."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 5.0
+    config.ppo.value_loss_coeff = 2.0  # Increased to keep value loss competitive
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # High entropy coefficients
+    config.ppo.entropy_coeff_start = 1.0
+    config.ppo.entropy_coeff_decay = 0.8
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1.0
+    config.ppo.edge_entropy_coeff = 1.0
+    config.ppo.army_entropy_coeff = 1.0
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 100
+    config.logging.keep_last_n_checkpoints = 10
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_larger_high_entropy_experiment"
+    config.logging.verbose_losses = True
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
     # Verification
     config.verification.enabled = True
-    config.verification.gradient_norm_threshold = 1000.0
     config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
     config.verification.analyze_gradients = True
     config.verification.analyze_weight_changes = True
-    config.verification.verify_gae_computation = False
-    config.verification.verify_model_outputs = False
-
-    # Logging
-    config.logging.experiment_name = "residual_percentage_4options"
-    config.logging.log_frequency = 50
-    
     return config
 
 
-def get_residual_percentage_unclipped_gradients_config() -> TrainingConfig:
-    """Configuration with minimal gradient clipping to allow natural gradient flow"""
+def get_transformer_larger_balanced_entropy_config() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
     config = TrainingConfig()
-    
-    # Model settings with percentage-based army selection
-    config.model.model_type = "residual"  # Use stable residual model
-    config.model.embed_dim = 64
-    config.model.n_army_options = 4  # 4 percentage options: 25%, 50%, 75%, 100%
-    config.model.max_army_send = 50  # Kept for backward compatibility
-    
-    # PPO settings with MUCH higher gradient clipping
-    config.ppo.learning_rate = 5e-4  # Higher learning rate from previous config
+    # Larger transformer model
+    config.model.model_type = "transformer"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 2e-4
     config.ppo.ppo_epochs = 2
     config.ppo.batch_size = 32
-    config.ppo.gradient_clip_norm = 100.0  # MUCH higher - allow natural gradients!
-    config.ppo.value_loss_coeff = 0.2
-    config.ppo.value_clip_range = 0.3
+    config.ppo.gradient_clip_norm = 15.0
+    config.ppo.value_loss_coeff = 0.5
     config.ppo.clip_eps = 0.2
     config.ppo.gamma = 0.99
     config.ppo.lam = 0.95
-    
-    # Entropy coefficients - moderate to allow exploration
-    config.ppo.entropy_coeff_start = 0.01
-    config.ppo.entropy_coeff_decay = 0.1
-    config.ppo.entropy_decay_episodes = 5000
-    config.ppo.placement_entropy_coeff = 0.2
-    config.ppo.edge_entropy_coeff = 0.3
-    config.ppo.army_entropy_coeff = 0.1
-    
-    # Adaptive training
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.03
+    config.ppo.entropy_coeff_decay = 0.02  # Decays from 0.03 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
     config.ppo.adaptive_epochs = True
-    
-    # Verification and monitoring
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 10
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_larger_balanced_entropy_experiment"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
+    # Verification
     config.verification.enabled = True
-    config.verification.detailed_logging = True
+    config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
     config.verification.analyze_gradients = True
     config.verification.analyze_weight_changes = True
-    
-    # Logging
-    config.logging.experiment_name = "residual_percentage_unclipped_gradients"
-    config.logging.verbose_losses = True
+    return config
+
+def get_transformer_edge_features_config() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 2e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 15.0
+    config.ppo.value_loss_coeff = 0.25
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.01
+    config.ppo.entropy_coeff_decay = 0.008  # Decays from 0.03 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 10
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_edge_features_experiment"
+    config.logging.verbose_losses = False
     config.logging.verbose_rewards = False
     config.logging.print_every_n_episodes = 25
-    
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
     return config
+

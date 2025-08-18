@@ -8,11 +8,15 @@ from src.game import Game
 
 
 class StatTracker:
-    s0 = 0
-    s1 = 0
-    s2 = 0
-    min = 1e9
-    max = -1e9
+    def __init__(self, alpha=0.7):
+        self.s0 = 0
+        self.s1 = 0.0
+        self.s2 = 0.0
+        self.min = 1e9
+        self.max = -1e9
+        self.mean_val = 0.0
+        self.var_val = 0.0
+        self.alpha = alpha
 
     def log(self, value):
         self.s0 += 1
@@ -23,21 +27,23 @@ class StatTracker:
         if value < self.min:
             self.min = value
 
-    def std(self):
-        n = self.s0
-        if n > 1:
-            std = np.sqrt((n * self.s2 - self.s1 * self.s1) / (n * (n - 1)))
+        # Update moving average and variance
+        if self.s0 == 1:
+            self.mean_val = value
+            self.var_val = 0.0
         else:
-            std = 0.0
-        return std
+            prev_mean = self.mean_val
+            self.mean_val = (1 - self.alpha) * self.mean_val + self.alpha * value
+            self.var_val = (1 - self.alpha) * self.var_val + self.alpha * (value - prev_mean) ** 2
+
+    def std(self):
+        if self.s0 > 1:
+            return np.sqrt(self.var_val)
+        else:
+            return 0.0
 
     def mean(self):
-        n = self.s0
-        if n > 0:
-            mean = self.s1 / n
-        else:
-            mean = 0.0
-        return mean
+        return self.mean_val
 
     def get_min(self):
         return self.min
@@ -45,12 +51,12 @@ class StatTracker:
     def get_max(self):
         return self.max
 
-
 class RewardNormalizer:
-    def __init__(self):
+    def __init__(self, alpha=0.1):
         self.mean = 0.0
         self.var = 1.0
         self.count = 1e-8
+        self.alpha = alpha
 
     def update(self, rewards: torch.Tensor):
 
@@ -67,8 +73,9 @@ class RewardNormalizer:
         M2 = m_a + m_b + delta ** 2 * self.count * batch_count / total_count
         new_var = M2 / total_count
 
-        self.mean = new_mean
-        self.var = new_var
+        # Exponential moving average update
+        self.mean = (1 - self.alpha) * self.mean + self.alpha * batch_mean
+        self.var = (1 - self.alpha) * self.var + self.alpha * batch_var
         self.count = total_count
 
     def normalize(self, rewards):
@@ -134,6 +141,8 @@ class RolloutBuffer:
         self.end_features_list = []
         # Store region ownership for proper masking during PPO updates
         self.owned_regions_list = []
+        self.starting_edge_features = []
+        self.end_edge_features = []
 
     def get_edges(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -207,7 +216,23 @@ class RolloutBuffer:
         
         return torch.stack(self.end_features_list).to(device)
 
-    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, end_features, owned_regions=None):
+    def get_starting_edge_features(self):
+        """Return properly batched node features [batch_size, num_nodes, features]"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not self.starting_edge_features:
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+
+        return torch.stack(self.starting_edge_features).to(device)
+
+    def get_end_edge_features(self):
+        """Return properly batched node features [batch_size, num_nodes, features]"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not self.end_edge_features:
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+
+        return torch.stack(self.end_edge_features).to(device)
+
+    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, end_features, owned_regions=None, starting_edge_features=None, end_edge_features=None):
         self.edges.append(edges)
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
@@ -239,6 +264,9 @@ class RolloutBuffer:
         self.starting_node_features_list.append(starting_node_features)
         self.post_placement_node_features_list.append(post_placement_node_features)
         self.end_features_list.append(end_features)
+        self.starting_edge_features.append(starting_edge_features)
+        self.end_edge_features.append(end_edge_features)
+
 
     def clear(self):
         self.__init__()
