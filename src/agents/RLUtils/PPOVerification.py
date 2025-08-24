@@ -506,7 +506,7 @@ class PPOVerifier:
                 if self.config.detailed_logging:
                     print(f"✅ Healthy army entropy")
     
-    def verify_value_computation(self, agent, features_batched, buffer, values_pred, returns, advantages):
+    def verify_value_computation(self, agent, features_batched, edge_features, buffer, values_pred, returns, advantages):
         """
         Verify value computation consistency and identify potential issues
         """
@@ -589,7 +589,7 @@ class PPOVerifier:
             print(f"    Features range: [{features_batched.min():.4f}, {features_batched.max():.4f}]")
         
         with torch.no_grad():
-            values_recomputed = agent.model.get_value(features_batched)
+            values_recomputed = agent.model.get_value(features_batched, edge_features)
             recompute_diff = self._safe_max_diff(values_pred, values_recomputed)
             if torch.isnan(recompute_diff):
                 print(f"🚨 ERROR: NaN in value recomputation (pred: {torch.isnan(values_pred).sum()}, recomputed: {torch.isnan(values_recomputed).sum()})")

@@ -230,8 +230,13 @@ def get_debug_config() -> TrainingConfig:
     config.verification.batch_verification_enabled = True
     config.logging.verbose_losses = True
     config.logging.verbose_rewards = True
+    config.verification.check_extreme_log_prob_diffs = True
+
     config.logging.print_every_n_episodes = 1
     config.logging.experiment_name = "debug_full_verification"
+
+    config.ppo.batch_size = 1  # Smaller batches for quicker iteration
+    config.model.model_type = "transformer_actor_critic"  # Use transformer for debugging
     return config
 
 
@@ -546,6 +551,8 @@ class ConfigFactory:
             "transformer_model_decisive": get_transformer_model_decisive_config,
             "transformer_large_high_entropy": get_transformer_larger_balanced_entropy_config,
             "transformer_edge_features": get_transformer_edge_features_config,
+            "transformer_actor_critic": get_transformer_actor_critic_config,
+            "transformer_actor_critic_v2": get_transformer_actor_critic_v2_config,
 
             "residual_low_entropy": get_residual_low_entropy_config,
             "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
@@ -761,7 +768,7 @@ def get_sage_model_decisive_config() -> TrainingConfig:
     
     # Model settings
     config.model.model_type = "sage"
-    config.model.embed_dim = 64
+    config.model.embed_dim = 128
 
     # PPO settings optimized for SAGE with proper army entropy
     config.ppo.learning_rate = 1e-4
@@ -774,24 +781,29 @@ def get_sage_model_decisive_config() -> TrainingConfig:
     config.ppo.lam = 0.95
     
     # Fixed entropy coefficients - properly scaled for 4 army options!
-    config.ppo.entropy_coeff_start = 0.05
-    config.ppo.entropy_coeff_decay = 0.04
+    config.ppo.entropy_coeff_start = 0.03
+    config.ppo.entropy_coeff_decay = 0.02
     config.ppo.entropy_decay_episodes = 10000
-    config.ppo.placement_entropy_coeff = 0.2  # Moderate placement exploration
-    config.ppo.edge_entropy_coeff = 0.3      # Moderate edge exploration  
-    config.ppo.army_entropy_coeff = 0.05     # Scaled properly: 1.0 × (2.0/5.64) × base_factor
+    config.ppo.placement_entropy_coeff = 1  # Moderate placement exploration
+    config.ppo.edge_entropy_coeff = 1      # Moderate edge exploration
+    config.ppo.army_entropy_coeff = 1     # Scaled properly: 1.0 × (2.0/5.64) × base_factor
 
     # Adaptive training
     config.ppo.adaptive_epochs = True
 
     # Verification
     config.verification.enabled = True
-    config.verification.detailed_logging = True
+    config.verification.detailed_logging = False
     config.verification.batch_verification_enabled = False
     config.verification.analyze_gradients = True
     config.verification.analyze_weight_changes = True
 
     # Logging
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+
     config.logging.experiment_name = "sage_model_decisive"
     config.logging.verbose_losses = False
     config.logging.verbose_rewards = False
@@ -991,14 +1003,14 @@ def get_transformer_edge_features_config() -> TrainingConfig:
     config.ppo.learning_rate = 2e-4
     config.ppo.ppo_epochs = 2
     config.ppo.batch_size = 32
-    config.ppo.gradient_clip_norm = 15.0
+    config.ppo.gradient_clip_norm = 5.0
     config.ppo.value_loss_coeff = 0.25
     config.ppo.clip_eps = 0.2
     config.ppo.gamma = 0.99
     config.ppo.lam = 0.95
     # Balanced entropy coefficients
-    config.ppo.entropy_coeff_start = 0.01
-    config.ppo.entropy_coeff_decay = 0.008  # Decays from 0.03 to 0.01 over 10000 episodes
+    config.ppo.entropy_coeff_start = 0.005
+    config.ppo.entropy_coeff_decay = 0.004  # Decays from 0.05 to 0.01 over 10000 episodes
     config.ppo.entropy_decay_episodes = 10000
     config.ppo.placement_entropy_coeff = 1
     config.ppo.edge_entropy_coeff = 1
@@ -1008,11 +1020,98 @@ def get_transformer_edge_features_config() -> TrainingConfig:
     # Logging and checkpointing
     config.logging.save_checkpoints = True
     config.logging.checkpoint_every_n_episodes = 500
-    config.logging.keep_last_n_checkpoints = 10
+    config.logging.keep_last_n_checkpoints = 25
     config.logging.auto_resume_latest = True
-    config.logging.experiment_name = "transformer_edge_features_experiment"
+    config.logging.experiment_name = "transformer_edge_features_experiment_v5"
     config.logging.verbose_losses = False
     config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_config() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 2e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 5.0
+    config.ppo.value_loss_coeff = 0.25
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.02
+    config.ppo.entropy_coeff_decay = 0.01  # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_v2_config() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 2e-4
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 5.0
+    config.ppo.value_loss_coeff = 0.25
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.02
+    config.ppo.entropy_coeff_decay = 0.01  # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_v2"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
     config.logging.print_every_n_episodes = 25
     # Verification
     config.verification.enabled = True

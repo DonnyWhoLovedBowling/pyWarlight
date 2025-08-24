@@ -85,9 +85,7 @@ class CheckpointManager:
             # PPO agent state
             "ppo_agent_state": self._get_ppo_agent_state(agent.ppo_agent),
             
-            # Reward normalizer state
-            "reward_normalizer_state": self._get_reward_normalizer_state(agent.ppo_agent.reward_normalizer),
-            
+
             # Agent-specific state
             "agent_state": {
                 "total_rewards": getattr(agent, 'total_rewards', {}),
@@ -131,22 +129,14 @@ class CheckpointManager:
             
             # Load model state
             if load_config.get("model", True):
-                agent.model.load_state_dict(checkpoint_data["model_state_dict"])
+                agent.model.load_state_dict(checkpoint_data["model_state_dict"], strict=False)
                 print("   ✅ Model state loaded")
             
             # Load optimizer state
             if load_config.get("optimizer", True):
                 agent.optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
                 print("   ✅ Optimizer state loaded")
-            
-            # Load reward normalizer
-            if load_config.get("reward_normalizer", True):
-                self._restore_reward_normalizer_state(
-                    agent.ppo_agent.reward_normalizer, 
-                    checkpoint_data.get("reward_normalizer_state", {})
-                )
-                print("   ✅ Reward normalizer state loaded")
-            
+
             # Load game number
             if load_config.get("game_number", True):
                 agent.game_number = checkpoint_data.get("game_number", 0)

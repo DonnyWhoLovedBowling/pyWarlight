@@ -1,3 +1,5 @@
+import random
+
 import torch
 import torch.nn.functional as f
 import torch.nn as nn
@@ -6,16 +8,16 @@ from src.game.Phase import Phase
 from torch.utils.tensorboard import SummaryWriter
 
 class PositionalEncoding(nn.Module):
-    """Add positional encoding based on region coordinates"""
-    def __init__(self, d_model, max_regions=200):
+    def __init__(self, d_model, max_regions=42, dropout=0.1):
         super().__init__()
         self.position_embedding = nn.Embedding(max_regions, d_model)
-        
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x, region_ids=None):
         if region_ids is None:
             region_ids = torch.arange(x.size(-2), device=x.device)
         pos_embed = self.position_embedding(region_ids)
-        return x + pos_embed
+        return self.dropout(x + pos_embed)
 
 class StableMultiHeadAttention(nn.Module):
     """Multi-head attention with gradient clipping and stability"""
@@ -147,23 +149,34 @@ class WarlightPolicyNetTransformer(nn.Module):
         self.army_percentages = torch.tensor([n/n_army_options for n in range(1, n_army_options + 1)], dtype=torch.float32)
         self.edge_tensor: torch.Tensor = None
 
-        # Input projection
-        self.input_proj = nn.Linear(node_feat_dim, embed_dim)
-        self.pos_encoding = PositionalEncoding(embed_dim)
+        # Input projection (Pre-LN)
+        self.input_proj = nn.Sequential(
+            nn.RMSNorm(node_feat_dim),
+            nn.Linear(node_feat_dim, embed_dim),
+            nn.Dropout(0.2)
+        )
+        self.pos_encoding = PositionalEncoding(embed_dim, dropout=0.3)
 
         # Transformer layers
         self.transformer_layers = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads, dropout=0.1)
+            TransformerBlock(embed_dim, num_heads, dropout=0.3)
             for _ in range(num_layers)
         ])
 
         # Edge transformer layers
         self.edge_transformer_layers = nn.ModuleList([
-            EdgeTransformerBlock(embed_dim, embed_dim, num_heads=2, dropout=0.1)
+            EdgeTransformerBlock(embed_dim, embed_dim, num_heads=2, dropout=0.3)
             for _ in range(num_layers)
         ])
 
         # Output heads - much simpler than GNN versions
+        # Correct input sizes for all layers using edge features (Pre-LN)
+        self.edge_input_proj = nn.Sequential(
+            nn.RMSNorm(2 * embed_dim + edge_feat_dim),
+            nn.Linear(2 * embed_dim + edge_feat_dim, embed_dim),
+            nn.Dropout(0.3)
+        )
+
         self.placement_head = nn.Sequential(
             nn.RMSNorm(embed_dim),
             nn.Linear(embed_dim, 32),
@@ -171,8 +184,6 @@ class WarlightPolicyNetTransformer(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(32, 1)
         )
-        # Correct input sizes for all layers using edge features
-        self.edge_input_proj = nn.Linear(2 * embed_dim + edge_feat_dim, embed_dim)
         self.edge_scorer = nn.Sequential(
             nn.RMSNorm(embed_dim),
             nn.Linear(embed_dim, 64),
@@ -336,10 +347,15 @@ class WarlightPolicyNetTransformer(nn.Module):
             edge_embeddings = self.get_edge_embeddings(edge_features, node_embeddings)
             attack_logits_flat = self.edge_scorer(edge_embeddings).squeeze(-1)
             army_logits_flat = self.army_scorer(edge_embeddings)
-            
+
             attack_logits = attack_logits_flat.view(batch_size, num_edges)
             army_logits = army_logits_flat.view(batch_size, num_edges, self.n_army_options)
-            
+            # if random.random() < 0.01:
+            #     # Debugging: log edge embeddings
+            #     print(f"edge_embeddings: {edge_embeddings}")
+            #     print(f"edge_logits: {attack_logits}")
+            #     print(f"army_logits: {army_logits}")
+
             # Conservative output clipping
             attack_logits = torch.clamp(attack_logits, min=-10.0, max=10.0)
             army_logits = torch.clamp(army_logits, min=-10.0, max=10.0)

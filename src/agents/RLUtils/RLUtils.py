@@ -142,6 +142,7 @@ class RolloutBuffer:
         # Store region ownership for proper masking during PPO updates
         self.owned_regions_list = []
         self.starting_edge_features = []
+        self.post_placement_edge_features = []
         self.end_edge_features = []
 
     def get_edges(self):
@@ -213,7 +214,11 @@ class RolloutBuffer:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.end_features_list:
             return torch.empty((0, 0, 8), dtype=torch.float32, device=device)
-        
+
+        for idx, t in enumerate(self.end_features_list):
+            if t.shape != self.end_features_list[0].shape:
+                print(
+                    f"Shape mismatch in end_features_list at index {idx}: {t.shape} vs {self.end_features_list[0].shape}")
         return torch.stack(self.end_features_list).to(device)
 
     def get_starting_edge_features(self):
@@ -224,6 +229,14 @@ class RolloutBuffer:
 
         return torch.stack(self.starting_edge_features).to(device)
 
+    def get_post_placement_edge_features(self):
+        """Return properly batched node features [batch_size, num_nodes, features]"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not self.post_placement_edge_features:
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+
+        return torch.stack(self.post_placement_edge_features).to(device)
+
     def get_end_edge_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -232,7 +245,9 @@ class RolloutBuffer:
 
         return torch.stack(self.end_edge_features).to(device)
 
-    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward, value, done, starting_node_features, post_placement_node_features, end_features, owned_regions=None, starting_edge_features=None, end_edge_features=None):
+    def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward,
+            value, done, starting_node_features, post_placement_node_features, end_features,
+            owned_regions=None, starting_edge_features=None, post_placement_edge_features = None, end_edge_features=None):
         self.edges.append(edges)
         attacks_tensor = torch.tensor(attacks, dtype=torch.long)
         placements_tensor = torch.tensor(placements, dtype=torch.long)
@@ -265,6 +280,8 @@ class RolloutBuffer:
         self.post_placement_node_features_list.append(post_placement_node_features)
         self.end_features_list.append(end_features)
         self.starting_edge_features.append(starting_edge_features)
+        self.post_placement_edge_features.append(post_placement_edge_features)
+
         self.end_edge_features.append(end_edge_features)
 
 

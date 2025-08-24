@@ -3,6 +3,7 @@ import time
 import sys
 import math
 import os
+import traceback
 from typing import Optional
 
 from collections import defaultdict
@@ -64,15 +65,16 @@ class RLGNNAgent(AgentBase):
     actual_attack_log_probs = torch.tensor([])
     
     buffer = RolloutBuffer()
-    placement_optimizer = torch.optim.AdamW(model.placement_head.parameters(), lr=1e-4)
+    placement_optimizer = torch.optim.AdamW(model.placement_head.parameters(), lr=5e-5)
     edge_optimizer = torch.optim.AdamW(
         [p for n, p in model.named_parameters() if not (
                 n.startswith('army_scorer') or n.startswith('value_head') or n.startswith('placement_head')
         )],
-        lr=1e-4
+        lr=1e-5,
+        weight_decay=1e-5
     )
-    army_optimizer = torch.optim.AdamW(model.army_scorer.parameters(), lr=5e-4)
-    value_optimizer = torch.optim.AdamW(model.value_head.parameters(), lr=1e-4)
+    army_optimizer = torch.optim.AdamW(model.army_scorer.parameters(), lr=5e-5)
+    value_optimizer = torch.optim.AdamW(model.value_head.parameters(), lr=5e-5)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.ppo.learning_rate)  # Use config learning rate
     ppo_agent = PPOAgent(model, placement_optimizer, edge_optimizer, army_optimizer, value_optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
@@ -160,7 +162,16 @@ class RLGNNAgent(AgentBase):
             new_model = ModelFactory.create_model(
                 config
             ).to(self.device)
-            
+            self.placement_optimizer = torch.optim.AdamW(new_model.placement_head.parameters(), lr=5e-5)
+            self.edge_optimizer = torch.optim.AdamW(
+                [p for n, p in new_model.named_parameters() if not (
+                        n.startswith('army_scorer') or n.startswith('value_head') or n.startswith('placement_head')
+                )],
+                lr=5e-6
+            )
+            self.army_optimizer = torch.optim.AdamW(new_model.army_scorer.parameters(), lr=1e-5)
+            self.value_optimizer = torch.optim.AdamW(new_model.value_head.parameters(), lr=5e-5)
+
             # Replace the model
             self.model = new_model
             
@@ -296,35 +307,39 @@ class RLGNNAgent(AgentBase):
         Handle both single samples and batches
 
         Args:
-            node_features: [num_nodes, features] for single OR [batch_size, num_nodes, features] for batch
-            action_edges: [num_edges, 2] for single OR [batch_size, num_edges, 2] for batch
+            node_features: [batch_size, num_nodes, features] for single OR [batch_size, num_nodes, features] for batch
+            action_edges: [batch_size, num_edges, 2] for single OR [batch_size, num_edges, 2] for batch
             action: Phase.PLACE_ARMIES or Phase.ATTACK_TRANSFER
+            edge_features: [batch_size, num_edges, edge_feature_dim] for batch inference
         """
         # Detect if this is a batch
         is_batch = node_features.dim() == 3  # [batch_size, num_nodes, features]
-
-        if is_batch:
-            # BATCH INFERENCE VERIFICATION: Check if inputs match stored single-sample data
-            if self._batch_verification_enabled and hasattr(self, '_single_inference_data'):
-                self._verify_batch_inputs_match_single_samples(node_features, action_edges, action)
-            return self._run_model_batch(node_features, action_edges, action, edge_features)
-        else:
-            # SINGLE SAMPLE INFERENCE: Store input data for later verification
-            if self._batch_verification_enabled:
-                self._store_single_inference_data(node_features, action_edges, action)
-            
-            # Single sample case - original logic
-            graph = node_features.to(dtype=torch.float, device=self.device)
-
-            if action_edges.numel() == 0 and action == Phase.ATTACK_TRANSFER:
-                return torch.tensor(0), torch.tensor(0), torch.tensor(0)
+        self.model.eval()  # Switch to evaluation mode
+        try:
+            if is_batch:
+                # BATCH INFERENCE VERIFICATION: Check if inputs match stored single-sample data
+                if self._batch_verification_enabled and hasattr(self, '_single_inference_data'):
+                    self._verify_batch_inputs_match_single_samples(node_features, action_edges, action)
+                return self._run_model_batch(node_features, action_edges, action, edge_features)
             else:
-                # CONSISTENCY FIX: Action edges are already padded/truncated in init_turn
-                # Just create edge mask for valid (non-padded) edges
-                edge_mask = (action_edges[:, 0] >= 0) & (action_edges[:, 1] >= 0)
-                
-                # Run model with padded edges - keep outputs at full size for consistency
-                return self.model(graph, action_edges, action, edge_mask, edge_features)
+                # SINGLE SAMPLE INFERENCE: Store input data for later verification
+                if self._batch_verification_enabled:
+                    self._store_single_inference_data(node_features, action_edges, action)
+
+                # Single sample case - original logic
+                graph = node_features.to(dtype=torch.float, device=self.device)
+
+                if action_edges.numel() == 0 and action == Phase.ATTACK_TRANSFER:
+                    return torch.tensor(0), torch.tensor(0), torch.tensor(0)
+                else:
+                    # CONSISTENCY FIX: Action edges are already padded/truncated in init_turn
+                    # Just create edge mask for valid (non-padded) edges
+                    edge_mask = (action_edges[:, 0] >= 0) & (action_edges[:, 1] >= 0)
+
+                    # Run model with padded edges - keep outputs at full size for consistency
+                    return self.model(graph, action_edges, action, edge_mask, edge_features)
+        finally:
+            self.model.train()  # Restore training mode
 
     def _store_single_inference_data(self, node_features: torch.Tensor, action_edges: torch.Tensor, action: str):
         """Store input data from single-sample inference for later verification against batch inputs"""
@@ -450,7 +465,7 @@ class RLGNNAgent(AgentBase):
         # Remove padding from all samples in batch
         valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, num_edges]
         self.model.to(device)
-        placement_logits, attack_logits, army_logits = self.model(
+        placement_logits, attack_logits, army_logits, value = self.model(
             node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
             action_edges,  # [batch_size, num_edges, 2] (with padding)
             action,
@@ -525,7 +540,7 @@ class RLGNNAgent(AgentBase):
             attack_logits = torch.tensor([])
             army_logits = torch.tensor([])
 
-        return placement_logits, attack_logits, army_logits
+        return placement_logits, attack_logits, army_logits, value
 
     @override
     def init_turn(self, game: Game):
@@ -562,10 +577,12 @@ class RLGNNAgent(AgentBase):
         self.init_turn(game)
         me = self.agent_number
         my_regions = game.regions_owned_by(me)
+        self.starting_edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float, device=self.device)
         with torch.no_grad():
-            placement_logits, attack_logits, army_logits = self.run_model(self.starting_node_features,
-                                                                          action_edges=self.action_edges,
-                                                                          action=Phase.PLACE_ARMIES
+            placement_logits, attack_logits, army_logits, value = self.run_model(self.starting_node_features,
+                                                                            action_edges=self.action_edges,
+                                                                            action=Phase.PLACE_ARMIES,
+                                                                            edge_features=self.starting_edge_features
                                                                           )
         self.placement_logits = placement_logits
 
@@ -639,12 +656,12 @@ class RLGNNAgent(AgentBase):
         self.post_placement_node_features = torch.tensor(game.create_node_features(), dtype=torch.float)
         self.edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float)
         with torch.no_grad():
-            placement_logits, attack_logits, army_logits = self.run_model(self.post_placement_node_features,
-                                                                          action_edges=self.action_edges,
-                                                                          action=Phase.ATTACK_TRANSFER,
-                                                                          edge_features=self.edge_features)
-
-        self.attack_logits, self.army_logits = attack_logits, army_logits
+            placement_logits, self.attack_logits, self.army_logits, value = self.run_model(
+                                                                                    self.post_placement_node_features,
+                                                                                    action_edges=self.action_edges,
+                                                                                    action=Phase.ATTACK_TRANSFER,
+                                                                                    edge_features=self.edge_features
+            )
 
         if per_node:
             edges = self.sample_attacks_per_node(game)
@@ -718,7 +735,7 @@ class RLGNNAgent(AgentBase):
             return
         end_features = torch.tensor(game.create_node_features(), dtype=torch.float32, device=self.device)
         end_edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float32, device=self.device)
-        value = self.model.get_value(end_features,end_edge_features,  self.writer, self.game_number).detach()
+        value = self.model.get_value(end_features,end_edge_features, self.action_edges).detach()
         done = int(game.is_done())
         reward = self.compute_rewards(game)
         attacks = self.get_attacks()
@@ -761,6 +778,7 @@ class RLGNNAgent(AgentBase):
             self.post_placement_node_features.clone(),  # Deep copy to prevent reference issues
             end_features.clone(),  # Deep copy to prevent reference issues
             owned_regions,
+            self.starting_edge_features,
             self.edge_features,
             end_edge_features
         )
@@ -835,16 +853,21 @@ class RLGNNAgent(AgentBase):
             destroyed_armies += a.result.defenders_destroyed
             if a.result.winner == FightSide.ATTACKER:
                 wins += 1
+            if self.game_number % 10 == 1:
+                # Log action efficiency histogram every 10 games
+                if a.is_attack():
+                    print(f"attacked from {a.from_region} ({a.from_region.owner}) to {a.to_region}, ({a.to_region.owner}) with {a.armies} armies, winner: {a.result.winner}, ")
+
         if len(attacks) > 0:
             self.army_per_attack_tracker.log(armies_used / len(attacks))
+            eff = destroyed_armies / armies_used
+            action_reward = 0.005
+            action_reward += 0.02 * eff
+
         else:
             self.army_per_attack_tracker.log(0)
         self.num_succes_attacks_tracker.log(wins)
 
-        if len(attacks) > 0:
-            eff = destroyed_armies / armies_used
-            action_reward = 0.005
-            action_reward += 0.02 * eff
 
         reward += action_reward
 
@@ -913,6 +936,7 @@ class RLGNNAgent(AgentBase):
             # Multi-side attack reward
             attack_targets = defaultdict(set)
             for a in attacks:
+
                 attack_targets[a[1]].add(a[0])
 
             multi_side_attack_reward = 0
@@ -1033,7 +1057,7 @@ class RLGNNAgent(AgentBase):
             
             # Compute log probabilities for the kept edges
             log_probs = f.log_softmax(candidate_logits, dim=-1)
-            
+
             # Convert each selected edge to individual (src, tgt) tuples and store corresponding log probs
             for i, edge in enumerate(kept_edges):
                 src_val, tgt_val = edge[0].item(), edge[1].item()
@@ -1042,7 +1066,7 @@ class RLGNNAgent(AgentBase):
                     # Find the index of this edge in the original candidate list
                     edge_idx = torch.where((candidate_edges == edge).all(dim=1))[0][0]
                     edge_selection_log_probs.append(log_probs[edge_idx].item())
-            
+
         # Store edge selection log probabilities for later use in create_attack_transfers
         self.edge_selection_log_probs = torch.tensor(edge_selection_log_probs) if edge_selection_log_probs else torch.tensor([])
         return ret
@@ -1095,14 +1119,14 @@ class RLGNNAgent(AgentBase):
                 raise ie
             used = round((float(k+1)/self.config.model.n_army_options)*(game.armies[src]-1))#
 
-            # if army_probs.numel() > 0 and self.game_number % 5 == 0 and game.round % 5 == 0:
-            #     # Log placement probabilities histogram every 10 games
-            #     for p in army_probs.cpu().detach().numpy():
-            #         self.writer.add_histogram('army_probs', p, self.game_number)
-            #     print(f"Using {used} armies for attack from {src} to {tgt} (available: {available_armies[src]})")
-            #     print(f"Army logits: {self.army_logits[original_idx]}")
-            #     print(f"Army probs: {army_probs}")
-            #
+            if army_probs.numel() > 0 and self.game_number % 5 == 0 and game.round % 5 == 0:
+                # Log placement probabilities histogram every 10 games
+                for p in army_probs.cpu().detach().numpy():
+                    self.writer.add_histogram('army_probs', p, self.game_number)
+                # print(f"Using {used} armies for attack from {src} to {tgt} (available: {available_armies[src]}) tgt is owned by {game.get_owner(tgt)}")
+                # print(f"Army logits: {self.army_logits[original_idx]}")
+                # print(f"Army probs: {army_probs}")
+
             if used == 0 or used >= available_armies[src]:
                 actual_attack_log_probs.append(0.0)  # No attack made
                 continue

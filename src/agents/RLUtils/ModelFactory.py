@@ -1,4 +1,6 @@
 from typing import Literal
+
+from src.agents.RLUtils.TransformerActorCritic import TransformerActorCritic
 from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
 from src.agents.RLUtils.WarlightModelResidual import WarlightPolicyNetResidual
 from src.agents.RLUtils.WarlightModelSAGE import WarlightPolicyNetSAGE
@@ -41,7 +43,8 @@ class ModelFactory:
         
         elif model_type == 'transformer':
             return WarlightPolicyNetTransformer(node_feat_dim, embed_dim, n_army_options=n_army_options, edge_feat_dim=edge_feat_dim)
-
+        elif model_type == 'transformer_actor_critic':
+            return TransformerActorCritic()
         else:
             raise ValueError(f"Unknown model type: {model_type}")
     

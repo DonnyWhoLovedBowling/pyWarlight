@@ -10,6 +10,7 @@ from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTrac
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 from src.config.training_config import VerificationConfig
 from src.agents.RLUtils.RLUtils import apply_placement_masking
+from src.agents.RLUtils.PopArt import PopArt
 
 if TYPE_CHECKING:
     from src.agents.RLUtils.CheckpointManager import CheckpointManager
@@ -65,7 +66,7 @@ class PPOAgent:
         self.edge_entropy_coeff = edge_entropy_coeff
         self.army_entropy_coeff = army_entropy_coeff
         
-        self.reward_normalizer = RewardNormalizer()
+        self.popart = PopArt(self.policy.value_head)
         self.adv_tracker = StatTracker()
         self.loss_tracker = StatTracker()
         self.act_loss_tracker = StatTracker()
@@ -194,40 +195,36 @@ class PPOAgent:
         return self.ppo_epochs
 
     def update(self, buffer: RolloutBuffer, last_value, agent):            
+        # Remove normalization of rewards before GAE
         rewards_tensor = buffer.get_rewards()
-        self.reward_normalizer.update(rewards_tensor)
-        normalized_rewards_tensor = self.reward_normalizer.normalize(rewards_tensor)
         device = rewards_tensor.device
+        # 1. Compute returns and advantages from raw rewards and values
         advantages, returns = compute_gae(
-            normalized_rewards_tensor,
+            rewards_tensor,
             buffer.get_values(),
             last_value,
             buffer.get_dones(),
             gamma=self.gamma,
             lam=self.lam
         )
-        
+        returns = torch.clamp(returns, -75, 75)
+        raw_advantages = advantages.clone()  # Store raw advantages for verification
+        # 4. Normalize returns for value loss (PopArt)
+        old_mean, old_std = self.popart.mean, self.popart.std
+        self.popart.update(returns)
+        if self.popart.mean != old_mean or self.popart.std != old_std:
+            self.popart.adjust_weights(old_mean, old_std)
+
         # Optional verification of GAE computation
         self.verifier.verify_gae_computation(
-            normalized_rewards_tensor, buffer.get_values(), last_value, 
-            buffer.get_dones(), advantages, returns, self.gamma, self.lam
+            rewards_tensor, buffer.get_values(), last_value,
+            buffer.get_dones(), raw_advantages, returns, self.gamma, self.lam
         )
-        self.value_tracker.log(buffer.get_values().mean().item())
-        agent.total_rewards['normalized_reward'] = normalized_rewards_tensor.mean().item()
-
-        self.adv_tracker.log(advantages.mean().item())
-        agent.total_rewards['advantage'] = advantages.mean().item()
-        # Store original advantages and returns before normalization/clipping for verification
-        original_advantages = advantages.clone()
-        original_returns = returns.clone()
-        
-        if agent.game_number > 1:
-            std = self.adv_tracker.std()
-            advantages = (advantages - self.adv_tracker.mean()) / (std + 1e-6)
-        clipped_returns = torch.clamp(returns, -75, 75)
-        self.returns_tracker.log(returns.mean().item())
-        agent.total_rewards['returns'] = returns.mean().item()
-        returns = clipped_returns
+        # Now normalize advantages for policy loss
+        if advantages.numel() > 1 and advantages.std() > 0:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        else:
+            advantages = torch.zeros_like(advantages)
 
         # Determine number of epochs to use (adaptive or fixed)
         initial_grad_norm = None
@@ -235,7 +232,8 @@ class PPOAgent:
         post_features_batched = buffer.get_post_placement_node_features()  # [batch_size, num_nodes, features]
         action_edges_batched = buffer.get_edges()  # [batch_size, num_edges, 2]
         starting_edge_features_batched = buffer.get_starting_edge_features()
-        post_edge_features_batched = buffer.get_end_edge_features()
+        post_edge_features_batched = buffer.get_post_placement_edge_features()
+        end_edge_features_batched = buffer.get_end_edge_features()
         for epoch in range(self.ppo_epochs + 2):  # + 2 to allow for adaptive adjustment
 
             # Get properly batched inputs - no reshaping needed!
@@ -246,17 +244,18 @@ class PPOAgent:
             )
             
             # Run model in batch mode
-            placement_logits, _, _ = agent.run_model(
-                node_features=starting_features_batched, 
+            placement_logits, _, _, _ = agent.run_model(
+                node_features=starting_features_batched,
+                edge_features=starting_edge_features_batched,
                 action_edges=action_edges_batched, 
                 action=Phase.PLACE_ARMIES
             )
 
-            _, attack_logits, army_logits = agent.run_model(
+            _, attack_logits, army_logits, _ = agent.run_model(
                 node_features=post_features_batched,
                 action_edges=action_edges_batched,
                 action=Phase.ATTACK_TRANSFER,
-                edge_features=starting_edge_features_batched,
+                edge_features=post_edge_features_batched,
             )
 
             # Optional verification of model outputs
@@ -415,6 +414,7 @@ class PPOAgent:
             agent.total_rewards['log_prob_diff_mean'] = (total_new_log_probs - total_old_log_probs).mean().item()
             agent.total_rewards['log_prob_diff_std'] = (total_new_log_probs - total_old_log_probs).std().item()
             agent.total_rewards['ppo_ratio'] = ratio.mean().item()
+            agent.total_rewards['advantages'] = advantages.mean().item()
 
             policy_loss = -torch.min(
                 ratio * advantages,
@@ -426,29 +426,33 @@ class PPOAgent:
             
             # Keep model in training mode for consistent value computation
             # (no mode switching to maintain consistency throughout)
-            values_pred = self.policy.get_value(buffer.get_end_features(), post_edge_features_batched, agent.writer, agent.game_number)#todo
+            values_pred = self.policy.get_value(buffer.get_end_features(), end_edge_features_batched, buffer.get_edges())
 
-            # Optional verification of value computation
-            self.verifier.verify_value_computation(
-                agent, buffer.get_end_features(), buffer, values_pred, original_returns, original_advantages
-            )
-            
+            # --- PopArt normalization and weight adjustment ---
+            old_mean, old_std = self.popart.mean, self.popart.std
+            self.popart.update(returns)
+            # If stats changed, adjust value head weights/bias
+            if self.popart.mean != old_mean or self.popart.std != old_std:
+                self.popart.adjust_weights(old_mean, old_std)
+            # Normalize returns for value loss
+            normalized_returns = self.popart.normalize(returns)
+
             # Value loss with optional clipping for additional regularization
             if self.value_clip_range is not None:
-                # Implement value clipping similar to policy clipping
                 old_values = buffer.get_values()
                 values_clipped = old_values + torch.clamp(
                     values_pred - old_values, -self.value_clip_range, self.value_clip_range
                 )
-                value_loss_unclipped = f.mse_loss(values_pred, returns)
-                value_loss_clipped = f.mse_loss(values_clipped, returns)
+                value_loss_unclipped = f.mse_loss(values_pred, normalized_returns)
+                value_loss_clipped = f.mse_loss(values_clipped, normalized_returns)
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
             else:
-                value_loss = f.mse_loss(values_pred, returns)
-                
+                value_loss = f.mse_loss(values_pred, normalized_returns)
+
             self.value_pred_tracker.log(values_pred.mean().item())
             agent.total_rewards['values_pred'] = values_pred.mean().item()
-            
+            agent.total_rewards['normalized_returns'] = normalized_returns.mean().item()
+
             # Fix placement_logits for entropy computation
             placement_logits_for_entropy = placement_logits.clone()
             all_inf_mask = torch.isinf(placement_logits_for_entropy).all(dim=-1)
@@ -537,56 +541,15 @@ class PPOAgent:
                 print('something went wrong with loss')
                 return
 
-            # --- Split optimization for each head ---
-            # 1. Zero all gradients first
-            # self.placement_optimizer.zero_grad()
-            # self.edge_optimizer.zero_grad()
-            # self.army_optimizer.zero_grad()
-            # self.value_optimizer.zero_grad()
-
-            # 2. Backward passes for all heads
-            placement_loss = policy_loss + self.placement_entropy_coeff * placement_entropy
-            edge_loss = policy_loss + self.edge_entropy_coeff * edge_entropy
-            army_loss = policy_loss + self.army_entropy_coeff * army_entropy
-            # Debug prints to check requires_grad status
-            placement_loss.backward(retain_graph=True)
-            edge_loss.backward(retain_graph=True)
-            army_loss.backward(retain_graph=True)
-            value_loss.backward(retain_graph=True)
-
+            loss.backward(retain_graph=True)
             # 3. Clip gradients and step for all optimizers
-            torch.nn.utils.clip_grad_norm_(self.policy.placement_head.parameters(), max_norm=self.gradient_clip_norm)
+
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.gradient_clip_norm)
+
             self.placement_optimizer.step()
-            torch.nn.utils.clip_grad_norm_(self.policy.edge_scorer.parameters(), max_norm=self.gradient_clip_norm)
             self.edge_optimizer.step()
-            torch.nn.utils.clip_grad_norm_(self.policy.army_scorer.parameters(), max_norm=self.gradient_clip_norm)
             self.army_optimizer.step()
-            torch.nn.utils.clip_grad_norm_(self.policy.value_head.parameters(), max_norm=self.gradient_clip_norm)
             self.value_optimizer.step()
-
-            def print_optimizer_params(optimizer, name):
-                print(f"Parameters in {name}:")
-                for i, group in enumerate(optimizer.param_groups):
-                    for p in group['params']:
-                        print(f"  {i}: {p.shape}, requires_grad={p.requires_grad}")
-
-            def print_module_params(module, name):
-                print(f"Parameters in {name} module:")
-                for n, p in module.named_parameters():
-                    print(f"  {n}: {p.shape}, requires_grad={p.requires_grad}")
-
-            # For each optimizer and module
-            print_optimizer_params(self.placement_optimizer, "placement_optimizer")
-            print_module_params(self.policy.placement_head, "placement_head")
-
-            print_optimizer_params(self.value_optimizer, "value_optimizer")
-            print_module_params(self.policy.value_head, "value_head")
-
-            print_optimizer_params(self.edge_optimizer, "edge_optimizer")
-            print_module_params(self.policy.edge_scorer, "edge_scorer")
-
-            print_optimizer_params(self.army_optimizer, "army_optimizer")
-            print_module_params(self.policy.army_scorer, "edge_scorer")
 
             # Enhanced gradient analysis
             grad_stats = self.verifier.analyze_gradients(self.policy, agent)
@@ -607,7 +570,6 @@ class PPOAgent:
                 self.prev_weights = {name: param.data.clone() for name, param in self.policy.named_parameters()}
 
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.gradient_clip_norm)
             # Ensure all model parameters and optimizer state are on the same device before step
             # Break early if we've done enough epochs (for adaptive case)
             if self.adaptive_epochs and epoch >= self.ppo_epochs - 1:
