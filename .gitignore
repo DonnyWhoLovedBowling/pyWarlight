@@ -45,3 +45,4 @@ learning*.txt
 *.0
 learning_stats*
 total_results*
+analysis/*
