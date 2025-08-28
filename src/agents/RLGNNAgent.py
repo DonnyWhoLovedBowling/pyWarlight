@@ -32,7 +32,7 @@ from src.game.Region import Region
 
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.PlaceArmies import PlaceArmies
-from src.agents.RLUtils.RLUtils import RolloutBuffer, StatTracker, compute_individual_log_probs, PrevStateBuffer
+from src.agents.RLUtils.RLUtils import RolloutBuffer, compute_individual_log_probs, PrevStateBuffer
 from src.agents.RLUtils.PPOAgent import PPOAgent
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 
@@ -65,20 +65,10 @@ class RLGNNAgent(AgentBase):
     actual_attack_log_probs = torch.tensor([])
     
     buffer = RolloutBuffer()
-    placement_optimizer = torch.optim.AdamW(model.placement_head.parameters(), lr=5e-5)
-    edge_optimizer = torch.optim.AdamW(
-        [p for n, p in model.named_parameters() if not (
-                n.startswith('army_scorer') or n.startswith('value_head') or n.startswith('placement_head')
-        )],
-        lr=1e-5,
-        weight_decay=1e-5
-    )
-    army_optimizer = torch.optim.AdamW(model.army_scorer.parameters(), lr=5e-5)
-    value_optimizer = torch.optim.AdamW(model.value_head.parameters(), lr=5e-5)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.ppo.learning_rate)  # Use config learning rate
-    ppo_agent = PPOAgent(model, placement_optimizer, edge_optimizer, army_optimizer, value_optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
-                         ppo_epochs=config.ppo.ppo_epochs, adaptive_epochs=config.ppo.adaptive_epochs,
+    ppo_agent = PPOAgent(model, optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
+                         ppo_epochs=config.ppo.ppo_epochs,
                          gradient_clip_norm=config.ppo.gradient_clip_norm, value_loss_coeff=config.ppo.value_loss_coeff,
                          value_clip_range=config.ppo.value_clip_range, verbose_losses=config.logging.verbose_losses,
                          entropy_coeff_start=config.ppo.entropy_coeff_start,
@@ -98,11 +88,7 @@ class RLGNNAgent(AgentBase):
     writer = SummaryWriter(log_dir=config.get_experiment_log_dir())  # Back to stable experiment
 
     game_number = 1
-    num_attack_tracker = StatTracker()
-    num_succes_attacks_tracker = StatTracker()
-    num_lost_regions_tracker = StatTracker()
-    army_per_attack_tracker = StatTracker()
-    
+
     # Checkpoint management
     checkpoint_manager: Optional[CheckpointManager] = None
 
@@ -162,22 +148,13 @@ class RLGNNAgent(AgentBase):
             new_model = ModelFactory.create_model(
                 config
             ).to(self.device)
-            self.placement_optimizer = torch.optim.AdamW(new_model.placement_head.parameters(), lr=5e-5)
-            self.edge_optimizer = torch.optim.AdamW(
-                [p for n, p in new_model.named_parameters() if not (
-                        n.startswith('army_scorer') or n.startswith('value_head') or n.startswith('placement_head')
-                )],
-                lr=5e-6
-            )
-            self.army_optimizer = torch.optim.AdamW(new_model.army_scorer.parameters(), lr=1e-5)
-            self.value_optimizer = torch.optim.AdamW(new_model.value_head.parameters(), lr=5e-5)
 
             # Replace the model
             self.model = new_model
-            
+            self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.ppo.learning_rate)
             # Recreate PPO agent with new model
-            self.ppo_agent = PPOAgent(self.model, self.placement_optimizer, self.edge_optimizer , self.army_optimizer, self.value_optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
-                                     ppo_epochs=config.ppo.ppo_epochs, adaptive_epochs=config.ppo.adaptive_epochs,
+            self.ppo_agent = PPOAgent(self.model, self.optimizer, gamma=config.ppo.gamma, lam=config.ppo.lam, clip_eps=config.ppo.clip_eps,
+                                     ppo_epochs=config.ppo.ppo_epochs,
                                      gradient_clip_norm=config.ppo.gradient_clip_norm, value_loss_coeff=config.ppo.value_loss_coeff,
                                      value_clip_range=config.ppo.value_clip_range, verbose_losses=config.logging.verbose_losses,
                                      entropy_coeff_start=config.ppo.entropy_coeff_start,
@@ -267,7 +244,6 @@ class RLGNNAgent(AgentBase):
                 "optimizer": config.logging.load_optimizer_state,
                 "reward_normalizer": config.logging.load_reward_normalizer,
                 "game_number": config.logging.load_game_number,
-                "stat_trackers": config.logging.load_stat_trackers,
                 "training_state": config.logging.load_training_state,
                 "ppo_state": True
             }
@@ -579,11 +555,11 @@ class RLGNNAgent(AgentBase):
         my_regions = game.regions_owned_by(me)
         self.starting_edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float, device=self.device)
         with torch.no_grad():
-            placement_logits, attack_logits, army_logits, value = self.run_model(self.starting_node_features,
-                                                                            action_edges=self.action_edges,
-                                                                            action=Phase.PLACE_ARMIES,
-                                                                            edge_features=self.starting_edge_features
-                                                                          )
+            placement_logits, _, _, _ = self.run_model(self.starting_node_features,
+                                                        action_edges=self.action_edges,
+                                                        action=Phase.PLACE_ARMIES,
+                                                        edge_features=self.starting_edge_features
+                                                    )
         self.placement_logits = placement_logits
 
         if len(my_regions) == 0:
@@ -591,7 +567,7 @@ class RLGNNAgent(AgentBase):
 
         # Store the original placement logits BEFORE masking for later use in PPO
         self.original_placement_logits = placement_logits.clone() if hasattr(placement_logits, 'clone') else placement_logits
-        
+
         # Now apply masking for action selection
         mine = [r.get_id() for r in my_regions]
         all_regions = set(range(len(game.world.regions)))
@@ -615,21 +591,21 @@ class RLGNNAgent(AgentBase):
             print(placement_probs)
             print(self.placement_logits)
             raise re
-            
+
         # Compute actual log probabilities for the selected placements using log_softmax for numerical stability
         placement_log_probs_full = f.log_softmax(self.placement_logits, dim=0)
         # Store log probabilities in the same order as get_placements() will return them
         actual_placement_log_probs = []
         placement = torch.bincount(nodes, minlength=self.placement_logits.size(0))
         ret = []
-        
+
         for ix, p in enumerate(placement.tolist()):
             if p > 0:
                 # For each army placed in this region, add the log probability
                 for _ in range(p):
                     actual_placement_log_probs.append(placement_log_probs_full[ix].item())
         self.actual_placement_log_probs = torch.tensor(actual_placement_log_probs)
-        
+
         for ix, p in enumerate(placement.tolist()):
             if p > 0:
                 ret.append(PlaceArmies(game.world.regions[ix], p))
@@ -652,81 +628,44 @@ class RLGNNAgent(AgentBase):
 
     @override
     def attack_transfer(self, game: Game) -> list[AttackTransfer]:
-        per_node = True
+        per_node = self.config.model.per_node_attack_sampling
         self.post_placement_node_features = torch.tensor(game.create_node_features(), dtype=torch.float)
         self.edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float)
         with torch.no_grad():
-            placement_logits, self.attack_logits, self.army_logits, value = self.run_model(
-                                                                                    self.post_placement_node_features,
-                                                                                    action_edges=self.action_edges,
-                                                                                    action=Phase.ATTACK_TRANSFER,
-                                                                                    edge_features=self.edge_features
-            )
+            _, self.attack_logits, self.army_logits, _ = self.run_model(
+                                                        self.post_placement_node_features,
+                                                        action_edges=self.action_edges,
+                                                        action=Phase.ATTACK_TRANSFER,
+                                                        edge_features=self.edge_features
+                                                        )
 
         if per_node:
             edges = self.sample_attacks_per_node(game)
         else:
-            edges = self.sample_n_attacks(game, 5)
+            edges = self.sample_n_attacks(game)
         return self.create_attack_transfers(game, edges)
 
     def terminate(self, game: Game):
         self.end_move(game)
-        self.buffer.clear()
         self.action_edges = torch.tensor([])
 
         self.writer.add_scalar('win', game.winning_player() == self.agent_number, self.game_number)
-        self.writer.add_scalar('loss_mean', self.ppo_agent.loss_tracker.mean(), self.game_number)
-        self.writer.add_scalar('loss_std', self.ppo_agent.loss_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('act_loss_mean', self.ppo_agent.act_loss_tracker.mean(), self.game_number)
-        self.writer.add_scalar('act_loss_std', self.ppo_agent.act_loss_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('crit_loss_mean', self.ppo_agent.crit_loss_tracker.mean(), self.game_number)
-        self.writer.add_scalar('crit_loss_std', self.ppo_agent.crit_loss_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('edge_entropy_mean', self.ppo_agent.edge_entropy_tracker.mean(), self.game_number)
-        self.writer.add_scalar('edge_entropy_std', self.ppo_agent.edge_entropy_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('placement_entropy_mean', self.ppo_agent.placement_entropy_tracker.mean(), self.game_number)
-        self.writer.add_scalar('placement_entropy_std', self.ppo_agent.placement_entropy_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('army_entropy_mean', self.ppo_agent.army_entropy_tracker.mean(), self.game_number)
-        self.writer.add_scalar('army_entropy_std', self.ppo_agent.army_entropy_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('entropy_loss_mean', self.ppo_agent.army_entropy_tracker.mean(), self.game_number)
-        self.writer.add_scalar('entropy_loss_std', self.ppo_agent.army_entropy_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('ratio_mean', self.ppo_agent.ratio_tracker.mean(), self.game_number)
-        self.writer.add_scalar('ratio_std', self.ppo_agent.ratio_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('advantage_mean', self.ppo_agent.adv_tracker.mean(), self.game_number)
-        self.writer.add_scalar('advantage_std', self.ppo_agent.adv_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('value_mean', self.ppo_agent.value_tracker.mean(), self.game_number)
-        self.writer.add_scalar('value_std', self.ppo_agent.value_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('value_pred_mean', self.ppo_agent.value_pred_tracker.mean(), self.game_number)
-        self.writer.add_scalar('value_pred_std', self.ppo_agent.value_pred_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('returns_mean', self.ppo_agent.returns_tracker.mean(), self.game_number)
-        self.writer.add_scalar('returns_std', self.ppo_agent.returns_tracker.std(), self.game_number)
-
-        self.writer.add_scalar('attacks_per_turn', self.num_attack_tracker.mean(), self.game_number)
-        self.writer.add_scalar('armies_per_attack', self.army_per_attack_tracker.mean(), self.game_number)
-        self.writer.add_scalar('won_battles_per_turn', self.num_succes_attacks_tracker.mean(), self.game_number)
-        self.writer.add_scalar('lost_regions', self.num_lost_regions_tracker.mean(), self.game_number)
-
+        self.writer.add_scalar('attacks_per_turn', self.total_rewards['num_attacks'] / game.round , self.game_number)
+        self.writer.add_scalar('won_battles_per_turn', self.total_rewards['won_battles'] / game.round, self.game_number)
+        self.writer.add_scalar('armies_per_attack', self.total_rewards['armies_per_attack'] / game.round, self.game_number)
+        self.writer.add_scalar('lost_regions', self.total_rewards['lost_regions'] / game.round, self.game_number)
+        self.writer.add_scalar('gained_regions', self.total_rewards['gained_regions'] / game.round, self.game_number)
         self.writer.add_scalar('turn_with_attack', self.total_rewards['turn_with_attack'] / game.round, self.game_number)
         self.writer.add_scalar('turn_with_mult_attacks', self.total_rewards['turn_with_mult_attacks'] / game.round, self.game_number)
-        self.writer.add_scalar('num_regions', self.total_rewards['num_regions'] / game.round, self.game_number)
         self.writer.add_scalar('army_difference', self.total_rewards['army_difference'] / game.round, self.game_number)
 
         for key, value in self.total_rewards.items():
-            if key in ['turn_with_attack', 'turn_with_mult_attacks', 'num_regions', 'army_difference']:
+            if key in ['turn_with_attack', 'turn_with_mult_attacks', 'army_difference', 'num_attacks', 'lost_regions', 'armies_per_attack', 'won_battles' ]:
                 continue
             self.writer.add_scalar(key, value, self.game_number)
 
         self.total_rewards = defaultdict(int)
+        self.prev_state = None
         self.game_number += 1
 
     @override
@@ -762,7 +701,12 @@ class RLGNNAgent(AgentBase):
             self.placement_logits, self.action_edges
         )
         attack_log_probs = attack_log_probs.squeeze() if attack_log_probs.dim() > 1 else attack_log_probs
-        
+        if any((attack_log_probs < -20) & (attack_log_probs > -1e6)):
+            print(f"⚠️  Warning: Extremely low attack log probabilities detected: {attack_log_probs}")
+            print(f"   Attack logits: {self.attack_logits}")
+            print(f"   Army logits: {self.army_logits}")
+            print(f"   Attacks tensor: {attacks_tensor}")
+            print(f"   Action edges: {self.action_edges}")
         # Store transition in buffer
         owned_regions = [r.get_id() for r in game.regions_owned_by(self.agent_number)] if hasattr(game, 'regions_owned_by') else None
         self.buffer.add(
@@ -783,8 +727,7 @@ class RLGNNAgent(AgentBase):
             end_edge_features
         )
         self.prev_state = PrevStateBuffer(prev_state=game, player_id=self.agent_number)
-
-        if game.round % self.batch_size == 0 or done:
+        if self.buffer.size() % self.batch_size == 0:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             next_value = value * (1 - done)
             self.ppo_agent.update(self.buffer, next_value.to(device), self)
@@ -819,7 +762,8 @@ class RLGNNAgent(AgentBase):
             gained_regions = len(curr_regions.difference(prev_regions))
             lost_regions = len(prev_regions.difference(curr_regions))
             region_reward = gained_regions * 0.05 - lost_regions * 0.025
-            self.num_lost_regions_tracker.log(lost_regions)
+            self.total_rewards['lost_regions'] += lost_regions
+            self.total_rewards['gained_regions'] += gained_regions
 
             reward += region_reward
 
@@ -843,9 +787,8 @@ class RLGNNAgent(AgentBase):
 
         # 4️⃣ Action dynamics
         attacks = self.get_attacks(inc_transfers=False, object_data=True)
-        self.num_attack_tracker.log(len(attacks))
+        self.total_rewards['num_attacks'] += len(attacks)
         wins = 0
-        losses = 0
         armies_used = 0
         destroyed_armies = 0
         for a in attacks:
@@ -859,14 +802,12 @@ class RLGNNAgent(AgentBase):
                     print(f"attacked from {a.from_region} ({a.from_region.owner}) to {a.to_region}, ({a.to_region.owner}) with {a.armies} armies, winner: {a.result.winner}, ")
 
         if len(attacks) > 0:
-            self.army_per_attack_tracker.log(armies_used / len(attacks))
+            self.total_rewards['armies_per_attack'] += (armies_used / len(attacks))
             eff = destroyed_armies / armies_used
             action_reward = 0.005
             action_reward += 0.02 * eff
 
-        else:
-            self.army_per_attack_tracker.log(0)
-        self.num_succes_attacks_tracker.log(wins)
+        self.total_rewards['won_battles'] += wins
 
 
         reward += action_reward
@@ -956,7 +897,7 @@ class RLGNNAgent(AgentBase):
                     enemy_armies += game.number_of_armies_owned(p)
 
             self.total_rewards['army_difference'] += my_armies - enemy_armies
-            self.total_rewards['num_regions'] += len(my_regions)
+            self.total_rewards['num_regions'] = max(self.total_rewards['num_regions'], len(my_regions))
             self.total_rewards['region_reward'] += region_reward
             self.total_rewards['continent_reward'] += continent_reward
             self.total_rewards['action_reward'] += action_reward
@@ -965,6 +906,8 @@ class RLGNNAgent(AgentBase):
             self.total_rewards['placement_reward'] += placement_rewards
             self.total_rewards['transfer_reward'] += transfer_reward
             self.total_rewards['reward'] += reward
+            self.total_rewards['enemy_armies'] = enemy_armies
+
             self.total_rewards['multi_side_attack_reward'] += multi_side_attack_reward
 
         return reward
@@ -990,36 +933,48 @@ class RLGNNAgent(AgentBase):
 
         return ret
 
-    def sample_n_attacks(self, game, n):
+    def sample_n_attacks(self, game):
         if len(self.action_edges) == 0:
             return []
-        # Use raw logits directly without temperature scaling
-        probs = torch.softmax(self.attack_logits, dim=0)
-        k = min(n, probs.size(0))
-        topk_probs, selected_idxs = torch.topk(probs, k)
 
-        # selected_idxs = (probs > (0.7 * probs.max())).nonzero(as_tuple=True)[0]
+        # CONSISTENCY FIX: Only consider valid (non-padded) edges
+        valid_edge_mask = (self.action_edges[:, 0] >= 0) & (self.action_edges[:, 1] >= 0)
+        valid_action_edges = self.action_edges[valid_edge_mask]
+        valid_attack_logits = self.attack_logits[valid_edge_mask]
+
+        # Use raw logits directly without temperature scaling
+        probs = torch.softmax(valid_attack_logits, dim=0)
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+
+        # calculate cumulative probs
+        cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_probs, dim=-1), dim=-1)
+
+        # apply top p threshold to cumulative probs
+        sorted_indices_to_keep = sorted_indices[cumulative_probs <= self.config.model.top_p]
+
+        # ensure at least one index is kept
+        if sorted_indices_to_keep.numel() == 0:
+            sorted_indices_to_keep = sorted_indices[:self.config.model.top_k]
+
         ret = []
-        if len(selected_idxs) == 0:
-            return ret
-        for idx in selected_idxs.tolist():
+        for idx in sorted_indices_to_keep.tolist():
             try:
                 src, tgt = self.action_edges[idx]
             except IndexError as ie:
                 print(self.action_edges.tolist())
                 print(probs)
                 print(idx)
-                print(selected_idxs)
+                print(sorted_indices_to_keep)
                 raise ie
             except ValueError as ve:
                 print(self.action_edges.tolist())
                 print(idx)
-                print(selected_idxs)
+                print(sorted_indices_to_keep)
                 print(ve)
                 raise ve
 
             if src != tgt:
-                ret.append((src.item(), tgt))
+                ret.append((src.item(), tgt.item()))
         return ret
 
     def sample_attacks_per_node(self, game: Game):
@@ -1065,7 +1020,16 @@ class RLGNNAgent(AgentBase):
                     ret.append((src_val, tgt_val))
                     # Find the index of this edge in the original candidate list
                     edge_idx = torch.where((candidate_edges == edge).all(dim=1))[0][0]
-                    edge_selection_log_probs.append(log_probs[edge_idx].item())
+                    log_prob = log_probs[edge_idx].item()
+                    try:
+                        edge_selection_log_probs.append(log_probs[edge_idx].item())
+                    except IndexError as ie:
+                        print(f"IndexError: {ie}")
+                        print(f"Candidate edges: {candidate_edges}")
+                        print(f"Kept edges: {kept_edges}")
+                        print(f"Edge idx: {edge_idx}")
+                        print(f"Log probs: {log_probs}")
+                        raise ie
 
         # Store edge selection log probabilities for later use in create_attack_transfers
         self.edge_selection_log_probs = torch.tensor(edge_selection_log_probs) if edge_selection_log_probs else torch.tensor([])

@@ -16,7 +16,7 @@
                 "-map",
                 "world",
                 "-config",
-                "transformer_large_high_entropy"
+                "transformer_actor_critic_kl_max_batch_size_global_sampling"
 
             ],
             "group": {

@@ -24,7 +24,10 @@ class ModelConfig:
     # Model architecture selection
     model_type: str = 'standard'  # 'standard', 'residual', 'sage', 'transformer'
     edge_feat_dim: int = 5  # Number of edge features (default 0 for backward compatibility)
-    
+    per_node_attack_sampling = True
+    top_p = 0.9  # For nucleus sampling if used
+    top_k = 5    # For top-k sampling if used
+
     def get_device(self) -> torch.device:
         """Get the actual torch device"""
         if self.device == 'auto':
@@ -553,6 +556,10 @@ class ConfigFactory:
             "transformer_edge_features": get_transformer_edge_features_config,
             "transformer_actor_critic": get_transformer_actor_critic_config,
             "transformer_actor_critic_v2": get_transformer_actor_critic_v2_config,
+            "transformer_actor_critic_higher_norm_clip": get_transformer_actor_critic_higher_norm_clip,
+            "transformer_actor_critic_kl_max_batch_size": get_transformer_actor_critic_kl_max_batch_size,
+            "transformer_actor_critic_kl_max_batch_size_v2": get_transformer_actor_critic_kl_max_batch_size_v2,
+            "transformer_actor_critic_kl_max_batch_size_global_sampling": get_transformer_actor_critic_kl_max_batch_size_global_sampling,
 
             "residual_low_entropy": get_residual_low_entropy_config,
             "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
@@ -1121,3 +1128,223 @@ def get_transformer_actor_critic_v2_config() -> TrainingConfig:
     config.verification.analyze_weight_changes = True
     return config
 
+def get_transformer_actor_critic_higher_norm_clip() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 5e-5
+    config.ppo.ppo_epochs = 2
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 10.0
+    config.ppo.value_loss_coeff = 0.5
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.02
+    config.ppo.entropy_coeff_decay = 0.01  # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_higher_norm_clip"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_higher_norm_clip() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 5e-5
+    config.ppo.ppo_epochs = 4
+    config.ppo.batch_size = 32
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.5
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.0005
+    config.ppo.entropy_coeff_decay = 0.0004  # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_higher_norm_clip_v2"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_kl_max_batch_size() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 3e-4
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 256
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.5
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.0005
+    config.ppo.entropy_coeff_decay = 0.0004  # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 500
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_kl_max_batch_size"
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_kl_max_batch_size_v2() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    # PPO settings
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 256
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.0002
+    config.ppo.entropy_coeff_decay = 0.0001 # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 5
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_kl_max_batch_size_v2"
+
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config
+
+def get_transformer_actor_critic_kl_max_batch_size_global_sampling() -> TrainingConfig:
+    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
+    config = TrainingConfig()
+    # Larger transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128  # If used in your architecture
+    config.model.per_node_attack_sampling = True  # Global sampling
+    config.model.top_p = 0.9  # Global sampling
+    config.model.top_k = 5  # Global sampling
+
+    # PPO settings
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 256
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.0002
+    config.ppo.entropy_coeff_decay = 0.0001 # Decays from 0.05 to 0.01 over 10000 episodes
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    # Adaptive epochs enabled
+    config.ppo.adaptive_epochs = True
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 5
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "transformer_actor_critic_kl_max_batch_size_global_sampling"
+
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+
+    config.logging.print_every_n_episodes = 25
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    return config

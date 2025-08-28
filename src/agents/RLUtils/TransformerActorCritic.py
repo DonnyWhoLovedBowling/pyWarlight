@@ -167,6 +167,7 @@ class TransformerActorCritic(nn.Module):
 
     def get_value(self, node_features, edge_features, action_edges):
 
+        self.eval()
         is_batch = node_features.dim() == 3
 
         # Node embedding and transformer
@@ -208,4 +209,6 @@ class TransformerActorCritic(nn.Module):
 
         if is_batch:
             value = value.squeeze(-1)
+        self.train()
+
         return value

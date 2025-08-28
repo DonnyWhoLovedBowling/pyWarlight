@@ -1,14 +1,10 @@
-import datetime
-import logging
-import os
+
 import torch
 import torch.nn.functional as f
 from typing import Optional, TYPE_CHECKING
-from src.agents.RLUtils.WarlightModel import WarlightPolicyNet
 from src.game.Phase import Phase
-from src.agents.RLUtils.RLUtils import RewardNormalizer, RolloutBuffer, StatTracker, compute_entropy, compute_gae, compute_individual_log_probs
+from src.agents.RLUtils.RLUtils import RolloutBuffer, compute_entropy, compute_gae, compute_individual_log_probs
 from src.agents.RLUtils.PPOVerification import PPOVerifier
-from src.config.training_config import VerificationConfig
 from src.agents.RLUtils.RLUtils import apply_placement_masking
 from src.agents.RLUtils.PopArt import PopArt
 
@@ -20,16 +16,12 @@ class PPOAgent:
     def __init__(
             self,
             policy,
-            placement_optimizer: torch.optim.Optimizer,
-            edge_optimizer: torch.optim.Optimizer,
-            army_optimizer: torch.optim.Optimizer,
-            value_optimizer: torch.optim.Optimizer,
+            optimizer,
             gamma=0.95,
             lam=0.95,
             clip_eps=0.30,
             ppo_epochs=1,
             enable_verification=False,  # Legacy parameter for backwards compatibility
-            adaptive_epochs=True,  # Enable adaptive epoch adjustment
             verification_config=None,  # New parameter for granular verification control
             gradient_clip_norm=0.1,  # Gradient clipping norm
             value_loss_coeff=0.5,  # Value loss coefficient
@@ -42,22 +34,20 @@ class PPOAgent:
             placement_entropy_coeff=0.1,  # Placement entropy coefficient
             edge_entropy_coeff=0.1,  # Edge entropy coefficient
             army_entropy_coeff=0.03,  # Army entropy coefficient
+            kl_threshold=0.03,  # KL-divergence threshold for early stopping
     ):
-        self.policy: WarlightPolicyNet = policy
-        self.placement_optimizer = placement_optimizer
-        self.edge_optimizer = edge_optimizer
-        self.army_optimizer = army_optimizer
-        self.value_optimizer = value_optimizer
+        self.policy = policy
+        self.optimizer = optimizer
         self.gamma = gamma
         self.lam = lam
         self.clip_eps = clip_eps
         self.ppo_epochs = ppo_epochs
-        self.adaptive_epochs = adaptive_epochs
         self.gradient_clip_norm = gradient_clip_norm
         self.value_loss_coeff = value_loss_coeff
         self.value_clip_range = value_clip_range
         self.verbose_losses = verbose_losses
-        
+        self.kl_threshold = kl_threshold
+
         # Entropy configuration
         self.entropy_coeff_start = entropy_coeff_start
         self.entropy_coeff_decay = entropy_coeff_decay
@@ -67,19 +57,7 @@ class PPOAgent:
         self.army_entropy_coeff = army_entropy_coeff
         
         self.popart = PopArt(self.policy.value_head)
-        self.adv_tracker = StatTracker()
-        self.loss_tracker = StatTracker()
-        self.act_loss_tracker = StatTracker()
-        self.crit_loss_tracker = StatTracker()
-        self.ratio_tracker = StatTracker()
-        self.placement_entropy_tracker = StatTracker()
-        self.edge_entropy_tracker = StatTracker()
-        self.army_entropy_tracker = StatTracker()
-        self.entropy_loss_tracker = StatTracker()
-        self.value_tracker = StatTracker()
-        self.value_pred_tracker = StatTracker()
-        self.returns_tracker = StatTracker()
-        
+
         # Initialize verification system
         self.verifier = PPOVerifier(verification_config=verification_config)
         
@@ -88,11 +66,6 @@ class PPOAgent:
         
         # For weight change tracking
         self.prev_weights = None
-        
-        # For adaptive epochs
-        self.gradient_history = []
-        self.current_adaptive_epochs = ppo_epochs
-        
 
     def _pad_log_prob_tensors_to_match(self, new_tensor, old_tensor, tensor_name=""):
         """
@@ -137,62 +110,23 @@ class PPOAgent:
             
         return new_tensor, old_tensor
     
-    def adjust_epochs_based_on_gradients(self, gradient_norm, agent):
+    def _compute_kl_divergence(self, old_log_probs, new_log_probs):
         """
-        Dynamically adjust the number of PPO epochs based on gradient magnitude and training stability
+        Compute mean KL-divergence between old and new log probabilities.
+        Args:
+            old_log_probs: [batch_size, num_actions]
+            new_log_probs: [batch_size, num_actions]
+        Returns:
+            Mean KL-divergence (scalar)
         """
-        if not self.adaptive_epochs:
-            return self.ppo_epochs
-            
-        # Store gradient history
-        self.gradient_history.append(gradient_norm)
-        if len(self.gradient_history) > 10:  # Keep last 10 updates
-            self.gradient_history.pop(0)
-        
-        # Calculate gradient stability (coefficient of variation)
-        if len(self.gradient_history) >= 3:
-            grad_mean = sum(self.gradient_history) / len(self.gradient_history)
-            grad_std = (sum((g - grad_mean) ** 2 for g in self.gradient_history) / len(self.gradient_history)) ** 0.5
-            grad_cv = grad_std / (grad_mean + 1e-8)  # Coefficient of variation
-        else:
-            grad_cv = 1.0  # High uncertainty with few samples
-        
-        # Adaptive epoch logic
-        if gradient_norm > 50:
-            # Very large gradients - use fewer epochs to avoid instability
-            self.ppo_epochs = 1
-            reason = "large gradients (>50)"
-        elif gradient_norm > 20:
-            # Moderate gradients - standard epochs
-            reason = "moderate gradients (20-50)"
-        elif gradient_norm < 1:
-            # Very small gradients - might need more epochs or learning has stagnated
-            if grad_cv < 1:  # Stable small gradients
-                self.ppo_epochs = self.current_adaptive_epochs + 2
-                reason = "small stable gradients (<1)"
-            else:
-                reason = "small unstable gradients (<1)"
-        else:
-            # Healthy gradients (1-20)
-            if grad_cv < 2:  # Stable
-                self.ppo_epochs = self.current_adaptive_epochs + 1
-                reason = "healthy stable gradients (1-20)"
-            else:  # Unstable
-                self.ppo_epochs = max(self.ppo_epochs - 1, 1)  # Reduce epochs for stability
-                reason = "healthy but unstable gradients (1-20)"
-        
-        # Smooth transitions - don't change epochs too rapidly
-        if self.verifier.enabled:
-            print(f"\n=== ADAPTIVE EPOCHS ===")
-            print(f"Gradient norm: {gradient_norm:.4f}")
-            print(f"Gradient CV: {grad_cv:.4f}")
-            print(f"Suggested epochs: {self.ppo_epochs} ({reason})")
-            print(f"Actual epochs: {self.current_adaptive_epochs}")
-        # Log for tensorboard
-        agent.total_rewards['adaptive_epochs'] = self.current_adaptive_epochs
-        agent.total_rewards['gradient_cv'] = grad_cv
-        
-        return self.ppo_epochs
+        # Convert log probs to probs
+        old_probs = torch.exp(old_log_probs)
+        new_probs = torch.exp(new_log_probs)
+        # Avoid log(0) and division by zero
+        eps = 1e-8
+        kl = old_probs * (old_log_probs - new_log_probs)
+        kl = kl.sum(dim=1)  # Sum over actions
+        return kl.mean().item()
 
     def update(self, buffer: RolloutBuffer, last_value, agent):            
         # Remove normalization of rewards before GAE
@@ -234,8 +168,7 @@ class PPOAgent:
         starting_edge_features_batched = buffer.get_starting_edge_features()
         post_edge_features_batched = buffer.get_post_placement_edge_features()
         end_edge_features_batched = buffer.get_end_edge_features()
-        for epoch in range(self.ppo_epochs + 2):  # + 2 to allow for adaptive adjustment
-
+        for epoch in range(self.ppo_epochs):
             # Get properly batched inputs - no reshaping needed!
 
             # Optional verification of input structure
@@ -339,9 +272,9 @@ class PPOAgent:
             # Count valid (non-zero) actions for proper averaging
             if placement_ratios.numel() > 0:
                 placement_mask = (old_placement_log_probs != 0.0)
-                if placement_mask.any():
+                if placement_mask.float().sum() > 0:
                     valid_placement_ratios = placement_ratios * placement_mask.float()
-                    placement_count = placement_mask.sum(dim=1).float() + eps
+                    placement_count = placement_mask.float().sum(dim=1) + eps
                     placement_avg_ratio = valid_placement_ratios.sum(dim=1) / placement_count
                 else:
                     placement_avg_ratio = torch.ones(len(advantages), device=device)
@@ -414,7 +347,7 @@ class PPOAgent:
             agent.total_rewards['log_prob_diff_mean'] = (total_new_log_probs - total_old_log_probs).mean().item()
             agent.total_rewards['log_prob_diff_std'] = (total_new_log_probs - total_old_log_probs).std().item()
             agent.total_rewards['ppo_ratio'] = ratio.mean().item()
-            agent.total_rewards['advantages'] = advantages.mean().item()
+            agent.total_rewards['advantages'] = raw_advantages.mean().item()
 
             policy_loss = -torch.min(
                 ratio * advantages,
@@ -422,10 +355,6 @@ class PPOAgent:
             ).mean()
             if torch.isnan(policy_loss).any() or torch.isinf(policy_loss).any():
                 raise RuntimeError(f'policy_loss inf!: {ratio}, {advantages}')
-            self.ratio_tracker.log(ratio.mean().item())
-            
-            # Keep model in training mode for consistent value computation
-            # (no mode switching to maintain consistency throughout)
             values_pred = self.policy.get_value(buffer.get_end_features(), end_edge_features_batched, buffer.get_edges())
 
             # --- PopArt normalization and weight adjustment ---
@@ -449,7 +378,6 @@ class PPOAgent:
             else:
                 value_loss = f.mse_loss(values_pred, normalized_returns)
 
-            self.value_pred_tracker.log(values_pred.mean().item())
             agent.total_rewards['values_pred'] = values_pred.mean().item()
             agent.total_rewards['normalized_returns'] = normalized_returns.mean().item()
 
@@ -463,28 +391,14 @@ class PPOAgent:
             placement_entropy, edge_entropy, army_entropy = compute_entropy(placement_logits_for_entropy, attack_logits, army_logits)
 
             if isinstance(placement_entropy, torch.Tensor):
-                self.placement_entropy_tracker.log(placement_entropy.mean().item())
                 agent.total_rewards['placement_entropy'] = placement_entropy.mean().item()
 
-            else:
-                self.placement_entropy_tracker.log(placement_entropy)
 
             if isinstance(edge_entropy, torch.Tensor):
-                self.edge_entropy_tracker.log(edge_entropy.mean().item())
                 agent.total_rewards['edge_entropy'] = edge_entropy.mean().item()
 
-            else:
-                self.edge_entropy_tracker.log(edge_entropy)
-
             if isinstance(army_entropy, torch.Tensor):
-                self.army_entropy_tracker.log(army_entropy.mean().item())
                 agent.total_rewards['army_entropy'] = army_entropy.mean().item()
-
-            else:
-                self.army_entropy_tracker.log(army_entropy)
-
-            self.act_loss_tracker.log(policy_loss.mean().item())
-            self.crit_loss_tracker.log(value_loss.mean().item())
 
             agent.total_rewards['policy_loss'] = policy_loss.mean().item()
             agent.total_rewards['value_loss'] = value_loss.mean().item()
@@ -521,11 +435,9 @@ class PPOAgent:
             entropy_loss = (self.placement_entropy_coeff * placement_entropy + 
                           self.edge_entropy_coeff * edge_entropy + 
                           self.army_entropy_coeff * army_entropy)
-            self.entropy_loss_tracker.log(entropy_loss.mean().item())
             agent.total_rewards['entropy_loss'] = entropy_loss.mean().item()
             # Both policy_loss and value_loss should be minimized (i.e., both positive, same sign)
             loss = policy_loss + self.value_loss_coeff * value_loss - entropy_factor * entropy_loss
-            self.loss_tracker.log(loss.mean().item())
             agent.total_rewards['total_loss'] = loss.mean().item()
             
             # Print detailed loss information if verbose_losses is enabled
@@ -540,40 +452,46 @@ class PPOAgent:
             if torch.isnan(loss).any() or torch.isinf(loss).any():
                 print('something went wrong with loss')
                 return
-
+            self.policy.to(device)
+            self.policy.edge_tensor.to(device)
+            self.optimizer.zero_grad()
             loss.backward(retain_graph=True)
             # 3. Clip gradients and step for all optimizers
 
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.edge_scorer.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.army_scorer.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.node_embed.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.edge_embed.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.transformer_encoder.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.post_transformer_ln.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.placement_head.parameters(), max_norm=self.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy.value_head.parameters(), max_norm=self.gradient_clip_norm)
+            # Print all parameter devices
 
-            self.placement_optimizer.step()
-            self.edge_optimizer.step()
-            self.army_optimizer.step()
-            self.value_optimizer.step()
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
+            self.optimizer.step()
 
             # Enhanced gradient analysis
-            grad_stats = self.verifier.analyze_gradients(self.policy, agent)
-            current_grad_norm = grad_stats.get('total_norm', 0) if grad_stats else 0
+            self.verifier.analyze_gradients(self.policy, agent)
 
-            # On first epoch, determine adaptive epoch count
-            if epoch == 0 and self.adaptive_epochs:
-                adaptive_epochs = self.adjust_epochs_based_on_gradients(current_grad_norm, agent)
-                if adaptive_epochs != self.ppo_epochs:
-                    print(f"🔄 Adjusting epochs from {self.ppo_epochs} to {adaptive_epochs} based on gradient analysis")
-                # Update the loop limit for remaining epochs
-
+            # KL-divergence early stopping (replace adaptive_epochs logic)
+            kl_placement = self._compute_kl_divergence(old_placement_log_probs, new_placement_log_probs) if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0 else 0.0
+            kl_attack = self._compute_kl_divergence(old_attack_log_probs, new_attack_log_probs) if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else 0.0
+            agent.total_rewards['kl_placement'] = kl_placement
+            agent.total_rewards['kl_attack'] = kl_attack
+            print(f"KL-divergence (placement): {kl_placement:.4f}, (attack): {kl_attack:.4f}, threshold: {self.kl_threshold}")
+            if kl_placement > self.kl_threshold or kl_attack > self.kl_threshold:
+                print(f"Early stopping PPO epoch loop due to KL-divergence > {self.kl_threshold}")
+                break
             # Weight change analysis (compare with previous weights)
             self.verifier.analyze_weight_changes(self.policy, self.prev_weights, agent)
 
             # Store current weights for next iteration comparison
             if self.verifier.enabled:
                 self.prev_weights = {name: param.data.clone() for name, param in self.policy.named_parameters()}
-
-            # Gradient clipping
-            # Ensure all model parameters and optimizer state are on the same device before step
-            # Break early if we've done enough epochs (for adaptive case)
-            if self.adaptive_epochs and epoch >= self.ppo_epochs - 1:
-                break
 
         # Save checkpoint using CheckpointManager if available
         if self.checkpoint_manager and self.checkpoint_manager.should_save_checkpoint(agent.game_number):

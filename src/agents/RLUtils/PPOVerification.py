@@ -420,7 +420,9 @@ class PPOVerifier:
                         print(f"  {name}: {relative_change:.4f} relative change (large)")
                     elif relative_change < 1e-6:  # Very small change
                         print(f"  {name}: {relative_change:.2e} relative change (minimal)")
-        
+                    else:
+                        print(f"  {name}: {relative_change:.2e} relative change (normal)")
+
         total_change = total_change ** 0.5
         total_weight_norm = total_weight_norm ** 0.5
         overall_relative_change = total_change / (total_weight_norm + 1e-8)

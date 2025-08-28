@@ -49,4 +49,4 @@ class Region:
         self.label_position = s
 
     def __repr__(self):
-        return self.name
+        return f"{self.name}, owner: {self.owner}"

@@ -144,6 +144,7 @@ class RolloutBuffer:
         self.starting_edge_features = []
         self.post_placement_edge_features = []
         self.end_edge_features = []
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     def get_edges(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -159,91 +160,78 @@ class RolloutBuffer:
         return torch.stack(self.edges).to(device)
 
     def get_attacks(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        padded = pad_tensor_list(self.attacks, pad_value=-1, target_device=device)
+        padded = pad_tensor_list(self.attacks, pad_value=-1, target_device=self.device)
         return padded
 
     def get_placements(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        padded = pad_tensor_list(self.placements, pad_value=-1, target_device=device)
+        padded = pad_tensor_list(self.placements, pad_value=-1, target_device=self.device)
         return padded
 
     def get_placement_log_probs(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.placement_log_probs:
-            return torch.tensor([], dtype=torch.float, device=device)
-        return pad_tensor_list(self.placement_log_probs, pad_value=0.0, target_device=device)
+            return torch.tensor([], dtype=torch.float, device=self.device)
+        return pad_tensor_list(self.placement_log_probs, pad_value=0.0, target_device=self.device)
 
     def get_attack_log_probs(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.attack_log_probs:
-            return torch.tensor([], dtype=torch.float, device=device)
-        return pad_tensor_list(self.attack_log_probs, pad_value=0.0, target_device=device)
+            return torch.tensor([], dtype=torch.float, device=self.device)
+        return pad_tensor_list(self.attack_log_probs, pad_value=0.0, target_device=self.device)
 
     def get_rewards(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.rewards, dtype=torch.float, device=device)
+        return torch.tensor(self.rewards, dtype=torch.float, device=self.device)
 
     def get_values(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.values, dtype=torch.float, device=device)
+        return torch.tensor(self.values, dtype=torch.float, device=self.device)
 
     def get_dones(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        return torch.tensor(self.dones, device=device)
+        return torch.tensor(self.dones, device=self.device)
 
     def get_starting_node_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.starting_node_features_list:
-            return torch.empty((0, 0, 8), dtype=torch.float32, device=device)
-        
+            return torch.empty((0, 0, 8), dtype=torch.float32, device=self.device)
+
         # Stack individual tensors into batch
-        return torch.stack(self.starting_node_features_list).to(device)
+        return torch.stack(self.starting_node_features_list).to(self.device)
 
     def get_post_placement_node_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.post_placement_node_features_list:
-            return torch.empty((0, 0, 8), dtype=torch.float32, device=device)
+            return torch.empty((0, 0, 8), dtype=torch.float32, device=self.device)
         
-        return torch.stack(self.post_placement_node_features_list).to(device)
+        return torch.stack(self.post_placement_node_features_list).to(self.device)
 
     def get_end_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.end_features_list:
-            return torch.empty((0, 0, 8), dtype=torch.float32, device=device)
+            return torch.empty((0, 0, 8), dtype=torch.float32, device=self.device)
 
         for idx, t in enumerate(self.end_features_list):
             if t.shape != self.end_features_list[0].shape:
                 print(
                     f"Shape mismatch in end_features_list at index {idx}: {t.shape} vs {self.end_features_list[0].shape}")
-        return torch.stack(self.end_features_list).to(device)
+        return torch.stack(self.end_features_list).to(self.device)
 
     def get_starting_edge_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.starting_edge_features:
-            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=self.device)
 
-        return torch.stack(self.starting_edge_features).to(device)
+        return torch.stack(self.starting_edge_features).to(self.device)
 
     def get_post_placement_edge_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.post_placement_edge_features:
-            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=self.device)
 
-        return torch.stack(self.post_placement_edge_features).to(device)
+        return torch.stack(self.post_placement_edge_features).to(self.device)
 
     def get_end_edge_features(self):
         """Return properly batched node features [batch_size, num_nodes, features]"""
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if not self.end_edge_features:
-            return torch.empty((0, 0, 3), dtype=torch.float32, device=device)
+            return torch.empty((0, 0, 3), dtype=torch.float32, device=self.device)
 
-        return torch.stack(self.end_edge_features).to(device)
+        return torch.stack(self.end_edge_features).to(self.device)
 
     def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward,
             value, done, starting_node_features, post_placement_node_features, end_features,
@@ -292,7 +280,9 @@ class RolloutBuffer:
         """Return the list of owned regions for each episode"""
         return self.owned_regions_list
 
-    # ... rest of methods remain the same ...
+    def size(self) -> int:
+        return len(self.rewards)
+
 
 def apply_placement_masking(placement_logits, owned_regions_list):
     """
@@ -662,8 +652,18 @@ def compute_individual_log_probs(
         # Find matching edges using broadcasting
         edge_matches = (attacks_flat.unsqueeze(2) == action_edges_flat.unsqueeze(1))  # [batch_size, max_attacks, num_edges]
         edge_indices = edge_matches.to(torch.long).argmax(dim=2)  # Convert to long, then argmax
-
-        # Mask valid attacks and edges
+        # Extra check: Compare (src, tgt) of attacks to those indexed by edge_indices in action_edges
+        src_tgt_match_mask = (
+            (attacks[:, :, 0] == action_edges[torch.arange(batch_size).unsqueeze(1), edge_indices, 0]) &
+            (attacks[:, :, 1] == action_edges[torch.arange(batch_size).unsqueeze(1), edge_indices, 1])
+        )  # [batch_size, max_attacks]
+        # You can use src_tgt_match_mask for further validation or debugging
+        # Example: print mismatches
+        if not src_tgt_match_mask.all():
+            print("Mismatch found between attacks and action_edges at indices:",
+                torch.nonzero(~src_tgt_match_mask))
+        # ...existing code...
+            # Mask valid attacks and edges
         attack_mask = (attacks[:, :, 0] >= 0)
         valid_match_mask = edge_matches.any(dim=2) & attack_mask  # [batch_size, max_attacks]
 

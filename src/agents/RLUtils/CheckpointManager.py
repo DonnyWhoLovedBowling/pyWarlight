@@ -23,7 +23,7 @@ class CheckpointManager:
         self.base_checkpoint_dir = os.path.join(config.logging.log_dir, "checkpoints")
         self.checkpoint_dir = os.path.join(self.base_checkpoint_dir, experiment_name)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.is_saved = False
+        self.n_saved = 0
         # Configuration
         self.save_frequency = config.logging.checkpoint_every_n_episodes
         self.keep_last_n = getattr(config.logging, 'keep_last_n_checkpoints', 5)
@@ -34,10 +34,9 @@ class CheckpointManager:
     
     def should_save_checkpoint(self, game_number: int) -> bool:
         """Check if we should save a checkpoint at this game number"""
-        if game_number % self.save_frequency == 0:
-            return not self.is_saved
+        if game_number // self.save_frequency > self.n_saved:
+            return True
         else:
-            self.is_saved = False
             return False
     
     def find_latest_checkpoint(self, experiment_name: Optional[str] = None) -> Optional[str]:
@@ -66,7 +65,7 @@ class CheckpointManager:
         """Save comprehensive checkpoint"""
         if not force and not self.should_save_checkpoint(game_number):
             return None
-        self.is_saved = True
+        self.n_saved += 1
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_filename = f"checkpoint_game_{game_number}_{timestamp}.pth"
         checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_filename)
@@ -93,13 +92,8 @@ class CheckpointManager:
                 "turns_count": getattr(agent, 'turns_count', 0),
                 "placement_count": getattr(agent, 'placement_count', 0),
                 "attack_count": getattr(agent, 'attack_count', 0)
-            },
-            
-            # Statistics and trackers
-            "stat_trackers": self._get_stat_tracker_states(agent),
-        }
-        
-        # Save checkpoint
+            }
+        }    
         try:
             torch.save(checkpoint_data, checkpoint_path)
             print(f"💾 Saved checkpoint: {os.path.basename(checkpoint_path)}")
