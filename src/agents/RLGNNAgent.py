@@ -1,3 +1,4 @@
+from email import policy
 import random
 import time
 import sys
@@ -11,9 +12,8 @@ from dataclasses import dataclass
 
 from torch.utils.tensorboard import SummaryWriter
 
-
-from src.agents.RLUtils.ModelFactory import ModelFactory
 from src.agents.RLUtils.CheckpointManager import CheckpointManager
+from src.agents.RLUtils.WarlightModelAutoregressiveTransformer import WarlightPolicy
 from src.game.FightSide import FightSide
 from src.game.Phase import Phase
 from src.config.training_config import TrainingConfig, ConfigFactory
@@ -28,7 +28,7 @@ import torch.nn.functional as f
 from src.engine.AgentBase import AgentBase
 
 from src.game.Game import Game
-from src.game.Region import Region
+from src.game.Region import Regionf
 
 from src.game.move.AttackTransfer import AttackTransfer
 from src.game.move.PlaceArmies import PlaceArmies
@@ -52,7 +52,17 @@ class RLGNNAgent(AgentBase):
     # Check for environment variable or use default
     config = ConfigFactory.create('transformer_edge_features')  # Use configurable training config
     
-    model = ModelFactory.create_model(config).to(default_device)
+    model = WarlightPolicy(
+        node_dim=config.model.in_channels,
+        edge_dim=config.model.edge_feat_dim,
+        hidden_dim=128,
+        msg_depth=3,
+        n_decoder_layers=3,
+        n_heads=4,
+        n_amount_bins=5,
+        dropout=0.1,
+        skip_residuals=False, # set True to remove residual connections
+    )
 
     placement_logits = torch.tensor([])
     attack_logits = torch.tensor([])
@@ -101,7 +111,7 @@ class RLGNNAgent(AgentBase):
     # and verifies they match during batch inference
     _single_inference_data = {}  # game_round -> {phase -> {node_features, action_edges}}
     _batch_verification_enabled = False  # Disabled by default - can be enabled for debugging
-
+    edge_tensor: Optional[torch.Tensor] = None
 
     @property
     def device(self):
@@ -170,7 +180,6 @@ class RLGNNAgent(AgentBase):
             self.ppo_agent.lam = config.ppo.lam
             self.ppo_agent.clip_eps = config.ppo.clip_eps
             self.ppo_agent.ppo_epochs = config.ppo.ppo_epochs
-            self.ppo_agent.adaptive_epochs = config.ppo.adaptive_epochs
             self.ppo_agent.gradient_clip_norm = config.ppo.gradient_clip_norm
             self.ppo_agent.value_loss_coeff = config.ppo.value_loss_coeff
             self.ppo_agent.value_clip_range = getattr(config.ppo, 'value_clip_range', None)
@@ -277,252 +286,12 @@ class RLGNNAgent(AgentBase):
 
         # Apply the full training configuration
 
-
-    def run_model(self, node_features: torch.Tensor, action_edges: torch.Tensor = None, action = None, edge_features = None):
-        """
-        Handle both single samples and batches
-
-        Args:
-            node_features: [batch_size, num_nodes, features] for single OR [batch_size, num_nodes, features] for batch
-            action_edges: [batch_size, num_edges, 2] for single OR [batch_size, num_edges, 2] for batch
-            action: Phase.PLACE_ARMIES or Phase.ATTACK_TRANSFER
-            edge_features: [batch_size, num_edges, edge_feature_dim] for batch inference
-        """
-        # Detect if this is a batch
-        is_batch = node_features.dim() == 3  # [batch_size, num_nodes, features]
-        self.model.eval()  # Switch to evaluation mode
-        try:
-            if is_batch:
-                # BATCH INFERENCE VERIFICATION: Check if inputs match stored single-sample data
-                if self._batch_verification_enabled and hasattr(self, '_single_inference_data'):
-                    self._verify_batch_inputs_match_single_samples(node_features, action_edges, action)
-                return self._run_model_batch(node_features, action_edges, action, edge_features)
-            else:
-                # SINGLE SAMPLE INFERENCE: Store input data for later verification
-                if self._batch_verification_enabled:
-                    self._store_single_inference_data(node_features, action_edges, action)
-
-                # Single sample case - original logic
-                graph = node_features.to(dtype=torch.float, device=self.device)
-
-                if action_edges.numel() == 0 and action == Phase.ATTACK_TRANSFER:
-                    return torch.tensor(0), torch.tensor(0), torch.tensor(0)
-                else:
-                    # CONSISTENCY FIX: Action edges are already padded/truncated in init_turn
-                    # Just create edge mask for valid (non-padded) edges
-                    edge_mask = (action_edges[:, 0] >= 0) & (action_edges[:, 1] >= 0)
-
-                    # Run model with padded edges - keep outputs at full size for consistency
-                    return self.model(graph, action_edges, action, edge_mask, edge_features)
-        finally:
-            self.model.train()  # Restore training mode
-
-    def _store_single_inference_data(self, node_features: torch.Tensor, action_edges: torch.Tensor, action: str):
-        """Store input data from single-sample inference for later verification against batch inputs"""
-        # Create a unique key for this inference call
-        # Use phase as primary key and round as secondary key since batches are separated by phase
-        phase_key = str(action)
-        # Count how many times this phase has been called to determine the round number
-        if phase_key not in self._single_inference_data:
-            self._single_inference_data[phase_key] = {}
-        round_key = len(self._single_inference_data[phase_key])  # Round number for this phase
-        
-        # Store deep copies of the input tensors
-        self._single_inference_data[phase_key][round_key] = {
-            'node_features': node_features.clone().detach(),
-            'action_edges': action_edges.clone().detach() if action_edges is not None else None,
-            'action': action
-        }
-        
-        print(f"📝 STORED single inference data - Phase {phase_key}, Round {round_key}")
-        print(f"   Node features shape: {node_features.shape}")
-        print(f"   Action edges shape: {action_edges.shape if action_edges is not None else 'None'}")
-        print(f"   Node features sample: {node_features[0, :3].detach().cpu().numpy()}")
-        if action_edges is not None and action_edges.numel() > 0:
-            print(f"   Action edges sample: {action_edges[:3].detach().cpu().numpy()}")
-
-    def _verify_batch_inputs_match_single_samples(self, node_features: torch.Tensor, action_edges: torch.Tensor, action: str):
-        """Verify that each sample in the batch matches previously stored single-sample data"""
-        batch_size = node_features.size(0)
-        phase_key = str(action)
-        
-        print(f"\n🔍 VERIFYING batch inputs match single samples")
-        print(f"   Batch size: {batch_size}, Phase: {phase_key}")
-        if phase_key in self._single_inference_data:
-            print(f"   Available rounds for {phase_key}: {list(self._single_inference_data[phase_key].keys())}")
-        else:
-            print(f"   No data found for phase {phase_key}")
-        
-        mismatches_found = False
-        
-        for batch_idx in range(batch_size):
-            # Each batch index should correspond to a round for this phase
-            round_key = batch_idx
-            
-            if phase_key not in self._single_inference_data:
-                print(f"   ❌ ERROR: No single inference data found for phase {phase_key}")
-                mismatches_found = True
-                continue
-                
-            if round_key not in self._single_inference_data[phase_key]:
-                print(f"   ❌ ERROR: No single inference data found for phase {phase_key}, round {round_key}")
-                mismatches_found = True
-                continue
-                
-            stored_data = self._single_inference_data[phase_key][round_key]
-            stored_node_features = stored_data['node_features']
-            stored_action_edges = stored_data['action_edges']
-            
-            # Extract current batch sample
-            batch_node_features = node_features[batch_idx]
-            batch_action_edges = action_edges[batch_idx] if action_edges is not None else None
-            
-            # Ensure tensors are on the same device for comparison
-            device = batch_node_features.device
-            stored_node_features = stored_node_features.to(device)
-            if stored_action_edges is not None:
-                stored_action_edges = stored_action_edges.to(device)
-            
-            # Verify node features match
-            if not torch.allclose(stored_node_features, batch_node_features, rtol=1e-5, atol=1e-6):
-                print(f"   ❌ MISMATCH in episode {batch_idx} node features!")
-                print(f"      Stored sample:  {stored_node_features[0, :3].detach().cpu().numpy()}")
-                print(f"      Batch sample:   {batch_node_features[0, :3].detach().cpu().numpy()}")
-                print(f"      Max difference: {(stored_node_features - batch_node_features).abs().max():.6f}")
-                mismatches_found = True
-            
-            # Verify action edges match (if both exist)
-            if stored_action_edges is not None and batch_action_edges is not None:
-                if not torch.equal(stored_action_edges, batch_action_edges):
-                    print(f"   ❌ MISMATCH in episode {batch_idx} action edges!")
-                    print(f"      Stored shape: {stored_action_edges.shape}, Batch shape: {batch_action_edges.shape}")
-                    print(f"      ISSUE: Single inference uses unpadded edges ({stored_action_edges.shape[0]} edges)")
-                    print(f"             Batch inference uses padded edges ({batch_action_edges.shape[0]} edges)")
-                    print(f"      This causes different model inputs and explains log prob differences!")
-                    mismatches_found = True
-            elif stored_action_edges is None and batch_action_edges is not None:
-                print(f"   ❌ MISMATCH in episode {batch_idx}: stored edges were None but batch has edges")
-                mismatches_found = True
-            elif stored_action_edges is not None and batch_action_edges is None:
-                print(f"   ❌ MISMATCH in episode {batch_idx}: stored edges exist but batch edges are None")
-                mismatches_found = True
-            
-            if batch_idx < 3:  # Only print details for first few episodes
-                print(f"   ✓ Episode {batch_idx} inputs match stored single inference data")
-        
-        if not mismatches_found:
-            print(f"   ✅ ALL batch inputs match stored single inference data perfectly!")
-        else:
-            print(f"   💥 INPUT MISMATCHES DETECTED - This explains log probability differences!")
-            
-        # Clear stored data for this specific phase after verification to avoid memory buildup
-        # Clear all rounds for this phase since they've been verified
-        if phase_key in self._single_inference_data:
-            del self._single_inference_data[phase_key]
-
-    def _run_model_batch(self, node_features: torch.Tensor, action_edges: torch.Tensor, action: str = None, edge_features = None):
-        """
-        Process batch by running model on each sample individually, then stack results
-
-        Args:
-            node_features: [batch_size, num_nodes, features]
-            action_edges: [batch_size, num_edges, 2] (padded to 83 edges)
-            action: Phase.PLACE_ARMIES or Phase.ATTACK_TRANSFER
-        """
-        device = node_features.device
-        batch_size = node_features.size(0)
-        num_nodes = node_features.size(1)
-
-        placement_logits_list = []
-        attack_logits_list = []
-        army_logits_list = []
-
-
-        # Remove padding from all samples in batch
-        valid_edge_masks = (action_edges[:, :, 0] >= 0) & (action_edges[:, :, 1] >= 0)  # [batch_size, num_edges]
-        self.model.to(device)
-        placement_logits, attack_logits, army_logits, value = self.model(
-            node_features.to(dtype=torch.float, device=device),  # [batch_size, num_nodes, features]
-            action_edges,  # [batch_size, num_edges, 2] (with padding)
-            action,
-            valid_edge_masks,
-            edge_features
-            # Pass mask to model to ignore padded edges
-        )
-        if action == Phase.PLACE_ARMIES:
-            placement_logits_list = [placement_logits[i] for i in range(batch_size)]
-        else:
-            attack_logits_list = [attack_logits[i] for i in range(batch_size)]
-            army_logits_list = [army_logits[i] for i in range(batch_size)]
-
-        # Stack and pad results
-        if action == Phase.PLACE_ARMIES or action is None:
-            # Stack placement logits
-            if all(pl.numel() > 0 for pl in placement_logits_list):
-                placement_logits = torch.stack(placement_logits_list)  # [batch_size, num_nodes]
-            else:
-                placement_logits = torch.zeros(batch_size, num_nodes)
-            # Log placement logits histogram
-        else:
-            placement_logits = torch.tensor([])
-
-        if action == Phase.ATTACK_TRANSFER or action is None:
-            # Pad attack logits to num_edges edges
-            padded_attack = []
-            num_edges = self.model.edge_tensor.size(1)
-            for al in attack_logits_list:
-                if al.numel() == 0:
-                    padded = torch.full((num_edges,), -1e9)
-                else:
-                    padding_needed = num_edges - al.size(0)
-                    if padding_needed > 0:
-                        padding = torch.full((padding_needed,), -1e9, device=device)
-                        padded = torch.cat([al, padding])
-                    else:
-                        padded = al[:num_edges]  # Truncate if too long
-                padded_attack.append(padded)
-            attack_logits = torch.stack(padded_attack)  # [batch_size, 42]
-            # Log attack (edge) logits histogram
-
-            # Pad army logits to [42, n_army_options]
-            n_army_options = max(arl.size(1) if arl.numel() > 0 else 0 for arl in army_logits_list)
-            if n_army_options == 0:
-                n_army_options = getattr(self.config.model, 'n_army_options', 4)  # Use config value instead of hardcoded 50
-
-            padded_army = []
-            for arl in army_logits_list:
-                if arl.numel() == 0:
-                    padded = torch.full((num_edges, n_army_options), -1e9)
-                else:
-                    # Pad edges dimension to num_edges
-                    edge_padding_needed = num_edges - arl.size(0)
-                    if edge_padding_needed > 0:
-                        edge_padding = torch.full((edge_padding_needed, arl.size(1)), -1e9, device=device)
-                        arl_edge_padded = torch.cat([arl, edge_padding])
-                    else:
-                        arl_edge_padded = arl[:num_edges]  # Truncate if too long
-
-                    # Pad army dimension to n_army_options
-                    army_padding_needed = n_army_options - arl_edge_padded.size(1)
-                    if army_padding_needed > 0:
-                        army_padding = torch.full((num_edges, army_padding_needed), -1e9)
-                        padded = torch.cat([arl_edge_padded, army_padding], dim=1)
-                    else:
-                        padded = arl_edge_padded[:, :n_army_options]
-                padded_army.append(padded)
-            army_logits = torch.stack(padded_army)  # [batch_size, num_edges, n_army_options]
-            # Log army logits histogram
-        else:
-            attack_logits = torch.tensor([])
-            army_logits = torch.tensor([])
-
-        return placement_logits, attack_logits, army_logits, value
-
     @override
     def init_turn(self, game: Game):
-        if self.model.edge_tensor is None:
-            self.model.edge_tensor = torch.tensor(game.world.torch_edge_list, dtype=torch.long, device=self.device)
-        num_edges = self.model.edge_tensor.size(1)
+        if self.edge_tensor is None:
+            self.edge_tensor = torch.tensor(game.world.torch_edge_list, dtype=torch.long, device=self.device)
+
+        num_edges = self.edge_tensor.size(1)
         original_action_edges = torch.tensor(game.create_action_edges(), dtype=torch.long, device=self.device)
 
         # CONSISTENCY FIX: Pad/truncate action edges to 83 to match batch inference
@@ -537,11 +306,19 @@ class RLGNNAgent(AgentBase):
             self.action_edges = original_action_edges
             
         # Store the original size for output truncation
-        self.original_num_edges = min(original_action_edges.size(0), num_edges)
 
         self.moves_this_turn = []
         self.starting_node_features = torch.tensor(game.create_node_features(), dtype= torch.float, device=self.device)
-
+        self.starting_edge_features = torch.tensor(game.create_edge_features(), dtype=torch.float, device=self.device)
+        all_actions = self.model.sample_actions(
+            node_feats=self.starting_node_features,
+            edge_feats=self.starting_edge_features,
+            edge_index=self.edge_tensor,
+            legal_edge_src_ownership=self.action_edges,
+            max_steps=self.config.model.max_attacks_per_turn,
+            top_p=self.config.model.top_p,
+        )
+        self.create_attack_transfers(all_actions)
     @override
     def choose_region(self, game: Game) -> Region:
         choosable = game.pickable_regions
@@ -561,68 +338,6 @@ class RLGNNAgent(AgentBase):
                                                         edge_features=self.starting_edge_features
                                                     )
         self.placement_logits = placement_logits
-
-        if len(my_regions) == 0:
-            return []
-
-        # Store the original placement logits BEFORE masking for later use in PPO
-        self.original_placement_logits = placement_logits.clone() if hasattr(placement_logits, 'clone') else placement_logits
-
-        # Now apply masking for action selection
-        mine = [r.get_id() for r in my_regions]
-        all_regions = set(range(len(game.world.regions)))
-        not_mine = all_regions.difference(set(mine))
-        available = game.armies_per_turn(me)
-        if not self.placement_logits.is_leaf:
-            self.placement_logits = self.placement_logits.detach()
-        self.placement_logits[list(not_mine)] = float('-inf')  # Mask out regions not owned by the agent
-
-        placement_probs = self.placement_logits.softmax(dim=0)
-        if placement_probs.numel() > 0 and self.game_number % 10 == 0 and game.round % 10 == 0:
-            # Log placement probabilities histogram every 10 games
-            for p in placement_probs.tolist():
-                self.writer.add_histogram('placement_probs', p, self.game_number)
-
-        try:
-            nodes = torch.multinomial(
-                placement_probs, num_samples=available, replacement=True
-            )
-        except RuntimeError as re:
-            print(placement_probs)
-            print(self.placement_logits)
-            raise re
-
-        # Compute actual log probabilities for the selected placements using log_softmax for numerical stability
-        placement_log_probs_full = f.log_softmax(self.placement_logits, dim=0)
-        # Store log probabilities in the same order as get_placements() will return them
-        actual_placement_log_probs = []
-        placement = torch.bincount(nodes, minlength=self.placement_logits.size(0))
-        ret = []
-
-        for ix, p in enumerate(placement.tolist()):
-            if p > 0:
-                # For each army placed in this region, add the log probability
-                for _ in range(p):
-                    actual_placement_log_probs.append(placement_log_probs_full[ix].item())
-        self.actual_placement_log_probs = torch.tensor(actual_placement_log_probs)
-
-        for ix, p in enumerate(placement.tolist()):
-            if p > 0:
-                ret.append(PlaceArmies(game.world.regions[ix], p))
-        self.moves_this_turn += ret
-        # After placements are determined
-        placements_next_to_enemy = 0
-        total_placements = 0
-        for ix, p in enumerate(placement.tolist()):
-            if p > 0:
-                total_placements += p
-            # Check if region has an enemy neighbor
-            region = game.world.regions[ix]
-            if game.is_enemy_border(region):
-                placements_next_to_enemy += p
-        # Add percentage of placements next to enemies to total_rewards
-        if total_placements > 0:
-            self.total_rewards['placement_next_to_enemy_pct'] += placements_next_to_enemy / total_placements
 
         return ret
 
@@ -933,109 +648,9 @@ class RLGNNAgent(AgentBase):
 
         return ret
 
-    def sample_n_attacks(self, game):
-        if len(self.action_edges) == 0:
-            return []
-
-        # CONSISTENCY FIX: Only consider valid (non-padded) edges
-        valid_edge_mask = (self.action_edges[:, 0] >= 0) & (self.action_edges[:, 1] >= 0)
-        valid_action_edges = self.action_edges[valid_edge_mask]
-        valid_attack_logits = self.attack_logits[valid_edge_mask]
-
-        # Use raw logits directly without temperature scaling
-        probs = torch.softmax(valid_attack_logits, dim=0)
-        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-
-        # calculate cumulative probs
-        cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_probs, dim=-1), dim=-1)
-
-        # apply top p threshold to cumulative probs
-        sorted_indices_to_keep = sorted_indices[cumulative_probs <= self.config.model.top_p]
-
-        # ensure at least one index is kept
-        if sorted_indices_to_keep.numel() == 0:
-            sorted_indices_to_keep = sorted_indices[:self.config.model.top_k]
-
-        ret = []
-        for idx in sorted_indices_to_keep.tolist():
-            try:
-                src, tgt = self.action_edges[idx]
-            except IndexError as ie:
-                print(self.action_edges.tolist())
-                print(probs)
-                print(idx)
-                print(sorted_indices_to_keep)
-                raise ie
-            except ValueError as ve:
-                print(self.action_edges.tolist())
-                print(idx)
-                print(sorted_indices_to_keep)
-                print(ve)
-                raise ve
-
-            if src != tgt:
-                ret.append((src.item(), tgt.item()))
-        return ret
-
-    def sample_attacks_per_node(self, game: Game):
-        if len(self.action_edges) == 0:
-            return []
-        
-        # CONSISTENCY FIX: Only consider valid (non-padded) edges
-        valid_edge_mask = (self.action_edges[:, 0] >= 0) & (self.action_edges[:, 1] >= 0)
-        valid_action_edges = self.action_edges[valid_edge_mask]
-        valid_attack_logits = self.attack_logits[valid_edge_mask]
-        
-        if len(valid_action_edges) == 0:
-            return []
-        if valid_attack_logits.numel() > 0 and self.game_number % 10 == 0 and game.round % 10 == 0:
-            # Log placement probabilities histogram every 10 games
-            for p in valid_attack_logits.softmax(dim=0).cpu().detach().numpy():
-                self.writer.add_histogram('edge_probs',p , self.game_number)
-
-        src_nodes = torch.unique(valid_action_edges[:, 0])
-        ret = []
-        edge_selection_log_probs = []
-        
-        for src in src_nodes:
-            mask = valid_action_edges[:, 0] == src
-            candidate_edges = valid_action_edges[mask]
-            candidate_logits = valid_attack_logits[mask]
-
-            probs = f.softmax(candidate_logits, dim=-1)
-            keep_mask = probs > 0.3
-            if keep_mask.any():
-                kept_edges = candidate_edges[keep_mask]
-            else:
-                max_idx = probs.argmax()
-                kept_edges = candidate_edges[max_idx].unsqueeze(0)  # Ensure it's 2D
+    def create_attack_transfers(actions):
+        for a in actions:
             
-            # Compute log probabilities for the kept edges
-            log_probs = f.log_softmax(candidate_logits, dim=-1)
-
-            # Convert each selected edge to individual (src, tgt) tuples and store corresponding log probs
-            for i, edge in enumerate(kept_edges):
-                src_val, tgt_val = edge[0].item(), edge[1].item()
-                if src_val != tgt_val:  # Avoid self-attacks
-                    ret.append((src_val, tgt_val))
-                    # Find the index of this edge in the original candidate list
-                    edge_idx = torch.where((candidate_edges == edge).all(dim=1))[0][0]
-                    log_prob = log_probs[edge_idx].item()
-                    try:
-                        edge_selection_log_probs.append(log_probs[edge_idx].item())
-                    except IndexError as ie:
-                        print(f"IndexError: {ie}")
-                        print(f"Candidate edges: {candidate_edges}")
-                        print(f"Kept edges: {kept_edges}")
-                        print(f"Edge idx: {edge_idx}")
-                        print(f"Log probs: {log_probs}")
-                        raise ie
-
-        # Store edge selection log probabilities for later use in create_attack_transfers
-        self.edge_selection_log_probs = torch.tensor(edge_selection_log_probs) if edge_selection_log_probs else torch.tensor([])
-        return ret
-
-    def create_attack_transfers(self, game: Game, edges):
         used_armies = defaultdict(int)
         available_armies = {src: a - 1 for src, a in enumerate(game.armies)}
          

@@ -19,6 +19,7 @@ class ModelConfig:
     embed_dim: int = 64
     max_army_send: int = 50  # Deprecated: kept for backward compatibility
     n_army_options: int = 4  # Number of army percentage options (25%, 50%, 75%, 100%)
+    max_attacks_per_turn: int = 12
     device: str = 'cpu'  # 'cpu', 'cuda', or 'auto'
     
     # Model architecture selection
