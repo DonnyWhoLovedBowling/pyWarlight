@@ -2,10 +2,11 @@
 import torch
 import torch.nn.functional as f
 from typing import Optional, TYPE_CHECKING
+from src.agents.RLUtils import WarlightModelAutoregressiveTransformer
+from src.config.training_config import PPOConfig, VerificationConfig
 from src.game.Phase import Phase
 from src.agents.RLUtils.RLUtils import RolloutBuffer, compute_entropy, compute_gae, compute_individual_log_probs
 from src.agents.RLUtils.PPOVerification import PPOVerifier
-from src.agents.RLUtils.RLUtils import apply_placement_masking
 from src.agents.RLUtils.PopArt import PopArt
 
 if TYPE_CHECKING:
@@ -15,46 +16,32 @@ if TYPE_CHECKING:
 class PPOAgent:
     def __init__(
             self,
-            policy,
-            optimizer,
-            gamma=0.95,
-            lam=0.95,
-            clip_eps=0.30,
-            ppo_epochs=1,
-            enable_verification=False,  # Legacy parameter for backwards compatibility
-            verification_config=None,  # New parameter for granular verification control
-            gradient_clip_norm=0.1,  # Gradient clipping norm
-            value_loss_coeff=0.5,  # Value loss coefficient
-            value_clip_range=None,  # Value clipping range (None = no clipping)
-            verbose_losses=False,  # Print detailed loss information
-            # Entropy configuration parameters
-            entropy_coeff_start=0.5,  # Initial entropy coefficient
-            entropy_coeff_decay=0.3,  # How much entropy decays
-            entropy_decay_episodes=15000,  # Episodes over which to decay
-            placement_entropy_coeff=0.1,  # Placement entropy coefficient
-            edge_entropy_coeff=0.1,  # Edge entropy coefficient
-            army_entropy_coeff=0.03,  # Army entropy coefficient
-            kl_threshold=0.03,  # KL-divergence threshold for early stopping
-    ):
+            policy: WarlightModelAutoregressiveTransformer.WarlightPolicy,
+            optimizer: torch.optim.Optimizer,
+            ppo_config: PPOConfig,
+            verification_config: VerificationConfig):
         self.policy = policy
         self.optimizer = optimizer
-        self.gamma = gamma
-        self.lam = lam
-        self.clip_eps = clip_eps
-        self.ppo_epochs = ppo_epochs
-        self.gradient_clip_norm = gradient_clip_norm
-        self.value_loss_coeff = value_loss_coeff
-        self.value_clip_range = value_clip_range
-        self.verbose_losses = verbose_losses
-        self.kl_threshold = kl_threshold
+        self.gamma = ppo_config.gamma
+        self.lam = ppo_config.lam
+        self.clip_eps = ppo_config.clip_eps
+        self.ppo_epochs = ppo_config.ppo_epochs
+        self.gradient_clip_norm = ppo_config.gradient_clip_norm
+        self.value_loss_coeff = ppo_config.value_loss_coeff
+        self.value_clip_range = ppo_config.value_clip_range
+        self.kl_threshold = ppo_config.kl_threshold
+        self.monitor_gradient_norm = ppo_config.monitor_gradient_norm
+        self.normalize_gradients = ppo_config.normalize_gradients
+        self.target_grad_norm = ppo_config.target_grad_norm
+        self._grad_norm_epsilon = 1e-8
 
         # Entropy configuration
-        self.entropy_coeff_start = entropy_coeff_start
-        self.entropy_coeff_decay = entropy_coeff_decay
-        self.entropy_decay_episodes = entropy_decay_episodes
-        self.placement_entropy_coeff = placement_entropy_coeff
-        self.edge_entropy_coeff = edge_entropy_coeff
-        self.army_entropy_coeff = army_entropy_coeff
+        self.entropy_coeff_start = ppo_config.entropy_coeff_start
+        self.entropy_coeff_decay = ppo_config.entropy_coeff_decay
+        self.entropy_decay_episodes = ppo_config.entropy_decay_episodes
+        self.placement_entropy_coeff = ppo_config.placement_entropy_coeff
+        self.edge_entropy_coeff = ppo_config.edge_entropy_coeff
+        self.army_entropy_coeff = ppo_config.army_entropy_coeff
         
         self.popart = PopArt(self.policy.value_head)
 
@@ -66,6 +53,9 @@ class PPOAgent:
         
         # For weight change tracking
         self.prev_weights = None
+        
+        # Verbose losses configuration (enabled for analysis)
+        self.verbose_losses = True
 
     def _pad_log_prob_tensors_to_match(self, new_tensor, old_tensor, tensor_name=""):
         """
@@ -109,6 +99,45 @@ class PPOAgent:
             old_tensor = old_tensor[:, :max_size]
             
         return new_tensor, old_tensor
+
+    def _align_vector_length(self, tensor: torch.Tensor, target_length: int, device: torch.device,
+                              fill_value: float = 1.0, tensor_name: str = "") -> torch.Tensor:
+        """
+        Ensure a 1D tensor matches the desired length by padding or trimming.
+
+        Args:
+            tensor: Input tensor expected to be 1D.
+            target_length: Desired length of the output tensor.
+            device: Target device for the resulting tensor.
+            fill_value: Value used for padding when tensor is shorter than target_length.
+            tensor_name: Optional name for debugging/logging.
+
+        Returns:
+            Tensor with shape [target_length].
+        """
+        if target_length <= 0:
+            return torch.empty((0,), device=device, dtype=tensor.dtype if tensor.numel() > 0 else torch.float32)
+
+        if tensor is None or tensor.numel() == 0:
+            return torch.full((target_length,), fill_value, device=device,
+                              dtype=tensor.dtype if tensor is not None and tensor.numel() > 0 else torch.float32)
+
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+
+        tensor = tensor.to(device)
+        current_length = tensor.size(0)
+
+        if current_length == target_length:
+            return tensor
+
+        if current_length < target_length:
+            pad_shape = (target_length - current_length,)
+            padding = torch.full(pad_shape, fill_value, device=device, dtype=tensor.dtype)
+            return torch.cat([tensor, padding], dim=0)
+
+        # current_length > target_length: trim extra entries
+        return tensor[:target_length]
     
     def _compute_kl_divergence(self, old_log_probs, new_log_probs):
         """
@@ -128,371 +157,209 @@ class PPOAgent:
         kl = kl.sum(dim=1)  # Sum over actions
         return kl.mean().item()
 
-    def update(self, buffer: RolloutBuffer, last_value, agent):            
-        # Remove normalization of rewards before GAE
-        rewards_tensor = buffer.get_rewards()
-        device = rewards_tensor.device
-        # 1. Compute returns and advantages from raw rewards and values
-        advantages, returns = compute_gae(
-            rewards_tensor,
-            buffer.get_values(),
-            last_value,
-            buffer.get_dones(),
-            gamma=self.gamma,
-            lam=self.lam
-        )
-        returns = torch.clamp(returns, -75, 75)
-        raw_advantages = advantages.clone()  # Store raw advantages for verification
-        # 4. Normalize returns for value loss (PopArt)
-        old_mean, old_std = self.popart.mean, self.popart.std
-        self.popart.update(returns)
-        if self.popart.mean != old_mean or self.popart.std != old_std:
-            self.popart.adjust_weights(old_mean, old_std)
+    @staticmethod
+    def _compute_grad_norm(parameters, norm_type: float = 2.0) -> float:
+        total = 0.0
+        for p in parameters:
+            if p.grad is None:
+                continue
+            param_norm = p.grad.data.norm(norm_type)
+            total += param_norm.item() ** norm_type
+        if total == 0.0:
+            return 0.0
+        return total ** (1.0 / norm_type)
 
-        # Optional verification of GAE computation
-        self.verifier.verify_gae_computation(
-            rewards_tensor, buffer.get_values(), last_value,
-            buffer.get_dones(), raw_advantages, returns, self.gamma, self.lam
-        )
-        # Now normalize advantages for policy loss
-        if advantages.numel() > 1 and advantages.std() > 0:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    def update(self, buffer: RolloutBuffer, last_value, agent):
+        torch.autograd.set_detect_anomaly(False)
+
+        if buffer.size() == 0:
+            return
+
+        device = next(self.policy.parameters()).device
+
+        rewards = buffer.get_rewards().to(device)
+        values = buffer.get_values().to(device)
+        dones = buffer.get_dones().to(device)
+
+        if isinstance(last_value, torch.Tensor):
+            last_value_tensor = last_value.detach().to(device=device, dtype=values.dtype)
         else:
-            advantages = torch.zeros_like(advantages)
+            last_value_tensor = torch.tensor(last_value, device=device, dtype=values.dtype)
 
-        # Determine number of epochs to use (adaptive or fixed)
-        initial_grad_norm = None
-        starting_features_batched = buffer.get_starting_node_features()  # [batch_size, num_nodes, features]
-        post_features_batched = buffer.get_post_placement_node_features()  # [batch_size, num_nodes, features]
-        action_edges_batched = buffer.get_edges()  # [batch_size, num_edges, 2]
-        starting_edge_features_batched = buffer.get_starting_edge_features()
-        post_edge_features_batched = buffer.get_post_placement_edge_features()
-        end_edge_features_batched = buffer.get_end_edge_features()
+        advantages, returns = compute_gae(rewards, values, last_value_tensor, dones, gamma=self.gamma, lam=self.lam)
+        advantages = advantages.to(device)
+        returns = returns.to(device)
+
+        if advantages.numel() > 1 and torch.var(advantages) > 0:
+            advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+
+        old_mean = self.popart.mean
+        old_std = self.popart.std
+        self.popart.update(returns.detach())
+        self.popart.adjust_weights(old_mean, old_std)
+        normalized_returns = self.popart.normalize(returns).detach()
+
+        batch_size = advantages.shape[0]
+
+        starting_node_features = buffer.get_starting_node_features().to(device)
+        starting_edge_features = buffer.get_starting_edge_features().to(device)
+        end_node_features = buffer.get_end_features().to(device)
+        end_edge_features = buffer.get_end_edge_features().to(device)
+
+        ownership_mask = buffer.get_ownership_mask()
+        if ownership_mask is None:
+            ownership_mask = torch.ones((batch_size, starting_node_features.size(1)), device=device)
+        else:
+            ownership_mask = ownership_mask.to(device)
+            if ownership_mask.dim() == 1 and batch_size > 1:
+                ownership_mask = ownership_mask.unsqueeze(0).expand(batch_size, -1)
+
+        armies_left = buffer.get_armies_left()
+        if armies_left.numel() == 0:
+            armies_left_tensor = torch.zeros((batch_size, starting_node_features.size(1)), device=device, dtype=starting_node_features.dtype)
+        else:
+            armies_left_tensor = armies_left.to(device=device, dtype=starting_node_features.dtype)
+            armies_left_tensor = torch.where(armies_left_tensor < 0, torch.zeros(1, device=device, dtype=armies_left_tensor.dtype), armies_left_tensor)
+
+        placements_tensor = buffer.get_placements()
+        if placements_tensor.numel() == 0:
+            placements_list = [[] for _ in range(batch_size)]
+        else:
+            placements_cpu = placements_tensor.cpu()
+            placements_list = []
+            for row in placements_cpu:
+                valid = row[row >= 0].tolist()
+                placements_list.append(valid)
+
+        attacks_data = buffer.get_attacks()
+        if batch_size == 1:
+            if isinstance(attacks_data, list):
+                attacks_for_policy = attacks_data[0] if len(attacks_data) > 0 else {}
+            else:
+                attacks_for_policy = attacks_data if isinstance(attacks_data, dict) else {}
+        else:
+            if isinstance(attacks_data, list):
+                attacks_for_policy = attacks_data
+            elif isinstance(attacks_data, dict):
+                attacks_for_policy = [attacks_data for _ in range(batch_size)]
+            else:
+                attacks_for_policy = [{} for _ in range(batch_size)]
+
+        old_placement_log_probs = buffer.get_placement_log_probs()
+        old_attack_log_probs = buffer.get_attack_log_probs()
+
+        if old_placement_log_probs.requires_grad:
+            raise RuntimeError(
+                "Expected placement log probabilities from buffer to be detached before PPO update. "
+                "Ensure action selection runs under torch.no_grad() and stored tensors are cloned/detached."
+            )
+        if old_attack_log_probs.requires_grad:
+            raise RuntimeError(
+                "Expected attack log probabilities from buffer to be detached before PPO update. "
+                "Ensure action selection runs under torch.no_grad() and stored tensors are cloned/detached."
+            )
+
+        def _sum_log_probs(log_prob_tensor: torch.Tensor, target_batch: int) -> torch.Tensor:
+            if not isinstance(log_prob_tensor, torch.Tensor) or log_prob_tensor.numel() == 0:
+                return torch.zeros(target_batch, device=device, dtype=returns.dtype)
+            log_prob_tensor = log_prob_tensor.to(device=device, dtype=returns.dtype)
+            if log_prob_tensor.dim() == 0:
+                return log_prob_tensor.reshape(1).expand(target_batch)
+            if log_prob_tensor.dim() == 1:
+                if log_prob_tensor.size(0) == target_batch:
+                    return log_prob_tensor
+                return torch.zeros(target_batch, device=device, dtype=returns.dtype)
+            return log_prob_tensor.sum(dim=1)
+
+        joint_logp_old = _sum_log_probs(old_placement_log_probs, batch_size) + _sum_log_probs(old_attack_log_probs, batch_size)
+
+        self.policy.train()
+
         for epoch in range(self.ppo_epochs):
-            # Get properly batched inputs - no reshaping needed!
+            self.optimizer.zero_grad(set_to_none=True)
 
-            # Optional verification of input structure
-            self.verifier.verify_structural_integrity(
-                starting_features_batched, post_features_batched, action_edges_batched, epoch
-            )
-            
-            # Run model in batch mode
-            placement_logits, _, _, _ = agent.run_model(
-                node_features=starting_features_batched,
-                edge_features=starting_edge_features_batched,
-                action_edges=action_edges_batched, 
-                action=Phase.PLACE_ARMIES
+            recompute = self.policy.recompute_turn_logprobs(
+                starting_node_features,
+                starting_edge_features,
+                ownership_mask,
+                placements_list,
+                attacks_for_policy,
+                armies_left_tensor,
+                action=None,
             )
 
-            _, attack_logits, army_logits, _ = agent.run_model(
-                node_features=post_features_batched,
-                action_edges=action_edges_batched,
-                action=Phase.ATTACK_TRANSFER,
-                edge_features=post_edge_features_batched,
-            )
-
-            # Optional verification of model outputs
-            self.verifier.verify_model_outputs(placement_logits, attack_logits, army_logits)
-            
-            # Optional verification of single vs batch inference consistency (before masking)
-            self.verifier.verify_single_vs_batch_inference(
-                agent, starting_features_batched, post_features_batched, 
-                action_edges_batched, placement_logits, attack_logits, army_logits, buffer, epoch
-            )
-            
-            # Apply the same masking that was used during action selection
-            owned_regions_list = buffer.get_owned_regions()
-            placement_logits = apply_placement_masking(placement_logits, owned_regions_list)
-            
-            # Check for problematic all-inf samples and fix them
-            all_inf_mask = torch.isinf(placement_logits).all(dim=-1)
-            if all_inf_mask.any():
-                placement_logits = placement_logits.clone()
-                placement_logits[all_inf_mask, 0] = 0.0
-
-            # Optional verification of buffer data integrity
-            self.verifier.verify_buffer_data_integrity(
-                starting_features_batched, post_features_batched, action_edges_batched, epoch
-            )
-
-            # Get individual log probabilities for each action
-            new_placement_log_probs, new_attack_log_probs = compute_individual_log_probs(
-                buffer.get_attacks(),
-                attack_logits,
-                army_logits,
-                buffer.get_placements(),
-                placement_logits,
-                buffer.get_edges(),
-            )
-            
-            # Optional verification of action data integrity
-            self.verifier.verify_action_data(
-                buffer.get_attacks(), buffer.get_placements(), buffer.get_edges(),
-                new_placement_log_probs, new_attack_log_probs
-            )
-            
-            # Get old individual log probabilities
-            old_placement_log_probs = buffer.get_placement_log_probs()
-            old_attack_log_probs = buffer.get_attack_log_probs()
-            
-            # Optional verification of old log probabilities
-            self.verifier.verify_old_log_probs(old_placement_log_probs, old_attack_log_probs)
-
-            # Ensure tensors have matching shapes by padding to the maximum size
-            new_placement_log_probs, old_placement_log_probs = self._pad_log_prob_tensors_to_match(
-                new_placement_log_probs, old_placement_log_probs, "placement"
-            )
-            new_attack_log_probs, old_attack_log_probs = self._pad_log_prob_tensors_to_match(
-                new_attack_log_probs, old_attack_log_probs, "attack"
-            )
-            
-            # Recalculate per-action ratios after padding
-            placement_diff = new_placement_log_probs - old_placement_log_probs if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0 else torch.tensor([])
-            attack_diff = new_attack_log_probs - old_attack_log_probs if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else torch.tensor([])
-            
-            # Optional check for extreme attack differences
-            self.verifier.check_extreme_attack_differences(attack_diff)
-            
-            # Clamp individual action differences to prevent extreme ratios (temporarily more aggressive)
-            if placement_diff.numel() > 0:
-                placement_diff = torch.clamp(placement_diff, -10, 10)  # Back to less aggressive clamping
-                placement_ratios = placement_diff.exp()
+            new_place_logps = recompute.get("logp", torch.empty((batch_size, 0), device=device, dtype=returns.dtype))
+            if isinstance(new_place_logps, torch.Tensor):
+                new_place_logps = new_place_logps.to(device=device, dtype=returns.dtype)
             else:
-                placement_ratios = torch.tensor([])
-                
-            if attack_diff.numel() > 0:
-                attack_diff = torch.clamp(attack_diff, -10, 10)  # Back to less aggressive clamping
-                attack_ratios = attack_diff.exp()
+                new_place_logps = torch.empty((batch_size, 0), device=device, dtype=returns.dtype)
+
+            new_attack_logps = recompute.get("attack_logp", torch.empty((batch_size, 0), device=device, dtype=returns.dtype))
+            if isinstance(new_attack_logps, torch.Tensor):
+                new_attack_logps = new_attack_logps.to(device=device, dtype=returns.dtype)
             else:
-                attack_ratios = torch.tensor([])
-            
-            # Simple approach: average ratios across all actions per episode
-            eps = 1e-8
-            
-            # Count valid (non-zero) actions for proper averaging
-            if placement_ratios.numel() > 0:
-                placement_mask = (old_placement_log_probs != 0.0)
-                if placement_mask.float().sum() > 0:
-                    valid_placement_ratios = placement_ratios * placement_mask.float()
-                    placement_count = placement_mask.float().sum(dim=1) + eps
-                    placement_avg_ratio = valid_placement_ratios.sum(dim=1) / placement_count
+                new_attack_logps = torch.empty((batch_size, 0), device=device, dtype=returns.dtype)
+
+            joint_logp_new = _sum_log_probs(new_place_logps, batch_size) + _sum_log_probs(new_attack_logps, batch_size)
+
+            logp_diff = torch.clamp(joint_logp_new - joint_logp_old, min=-20.0, max=20.0)
+            ratio = torch.exp(logp_diff)
+            clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
+            policy_loss = -(torch.min(ratio * advantages, clipped_ratio * advantages)).mean()
+
+            value_pred = self.policy.get_value(end_node_features, end_edge_features).to(device=device, dtype=returns.dtype)
+            normalized_value_pred = self.popart.normalize(value_pred)
+            value_loss = f.mse_loss(normalized_value_pred, normalized_returns)
+
+            placement_entropy = torch.tensor(recompute.get("placement_entropy", 0.0), device=device, dtype=returns.dtype)
+            attack_entropy = torch.tensor(recompute.get("attack_entropy", 0.0), device=device, dtype=returns.dtype)
+            joint_entropy = torch.tensor(recompute.get("joint_entropy", 0.0), device=device, dtype=returns.dtype)
+
+            entropy_loss = (
+                self.placement_entropy_coeff * placement_entropy
+                + self.edge_entropy_coeff * attack_entropy
+                + self.army_entropy_coeff * joint_entropy
+            )
+
+            total_loss = policy_loss + self.value_loss_coeff * value_loss - entropy_loss
+
+            total_loss.backward()
+
+            parameters = [p for p in self.policy.parameters() if p.grad is not None]
+            grad_norm_raw = 0.0
+            grad_norm_post_scale = 0.0
+            grad_scale = 1.0
+            clipped_norm = 0.0
+
+            if parameters:
+                if self.monitor_gradient_norm or self.normalize_gradients:
+                    grad_norm_raw = self._compute_grad_norm(parameters)
+                    grad_norm_post_scale = grad_norm_raw
+
+                if self.normalize_gradients and grad_norm_raw > self._grad_norm_epsilon:
+                    grad_scale = self.target_grad_norm / (grad_norm_raw + self._grad_norm_epsilon)
+                    for p in parameters:
+                        p.grad.mul_(grad_scale)
+                    grad_norm_post_scale = grad_norm_raw * grad_scale
+
+                if self.gradient_clip_norm is not None and self.gradient_clip_norm > 0:
+                    clipped_tensor_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=self.gradient_clip_norm)
+                    clipped_norm = float(clipped_tensor_norm)
                 else:
-                    placement_avg_ratio = torch.ones(len(advantages), device=device)
-            else:
-                placement_avg_ratio = torch.ones(len(advantages), device=device)
-            
-            if attack_ratios.numel() > 0:
-                # Better approach: Use old_attack_log_probs to identify episodes with real attacks
-                # Real attack log probs should be negative (since they're log probabilities)
-                # Padding entries are exactly 0.0
-                valid_attack_mask = (old_attack_log_probs < -1e-6)  # Real log probs are negative
-                episodes_with_attacks = valid_attack_mask.any(dim=1)  # [batch_size] - which episodes have any attacks
-                
-                if episodes_with_attacks.any():
-                    # For episodes with attacks, compute average ratio
-                    valid_ratios = attack_ratios * valid_attack_mask.float()
-                    valid_count = valid_attack_mask.sum(dim=1).float()
-                    
-                    # Only compute rcheckatios for episodes that actually have attacks
-                    attack_avg_ratio = torch.ones(len(advantages), device=device)
-                    episodes_with_attacks_indices = episodes_with_attacks.nonzero(as_tuple=True)[0]
-                    
-                    if len(episodes_with_attacks_indices) > 0:
-                        attack_ratios_for_episodes = valid_ratios[episodes_with_attacks_indices].sum(dim=1) / valid_count[episodes_with_attacks_indices]
-                        attack_avg_ratio[episodes_with_attacks_indices] = attack_ratios_for_episodes
-                else:
-                    # No episodes have attacks - use neutral ratio
-                    attack_avg_ratio = torch.ones(len(advantages), device=device)
-            else:
-                attack_avg_ratio = torch.ones(len(advantages), device=device)
-            
-            # Combine ratios with equal weighting
-            ratio = (placement_avg_ratio + attack_avg_ratio) / 2.0
-            ratio = torch.clamp(ratio, 0.1, 10.0)
-            
-            # For logging, compute total log prob differences
-            if new_placement_log_probs.numel() > 0 and new_attack_log_probs.numel() > 0:
-                total_new_log_probs = new_placement_log_probs.sum(dim=1) + new_attack_log_probs.sum(dim=1)
-            elif new_placement_log_probs.numel() > 0:
-                total_new_log_probs = new_placement_log_probs.sum(dim=1)
-            elif new_attack_log_probs.numel() > 0:
-                total_new_log_probs = new_attack_log_probs.sum(dim=1)
-            else:
-                total_new_log_probs = torch.zeros(len(advantages))
-                
-            if old_placement_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0:
-                total_old_log_probs = old_placement_log_probs.sum(dim=1) + old_attack_log_probs.sum(dim=1)
-            elif old_placement_log_probs.numel() > 0:
-                total_old_log_probs = old_placement_log_probs.sum(dim=1)
-            elif old_attack_log_probs.numel() > 0:
-                total_old_log_probs = old_attack_log_probs.sum(dim=1)
-            else:
-                total_old_log_probs = torch.zeros(len(advantages))
-            
-            # Optional check for extreme log probability differences
-            self.verifier.check_extreme_log_prob_differences(total_new_log_probs, total_old_log_probs)
-            
-            # Check for NaN/inf values in ratios
-            if torch.isnan(ratio).any() or torch.isinf(ratio).any():
-                ratio = torch.ones_like(ratio)
-            
-            # Optional verification of action distribution
-            self.verifier.analyze_action_distribution(placement_logits, attack_logits, army_logits, agent)
+                    clipped_norm = grad_norm_post_scale
 
-            # Note: Model remains in training mode throughout PPO update for consistency
-            # with action selection behavior (no mode switching needed)
-            
-            agent.total_rewards['new_log_probs_mean'] = total_new_log_probs.mean().item()
-            agent.total_rewards['old_log_probs_mean'] = total_old_log_probs.mean().item()
-            agent.total_rewards['log_prob_diff_mean'] = (total_new_log_probs - total_old_log_probs).mean().item()
-            agent.total_rewards['log_prob_diff_std'] = (total_new_log_probs - total_old_log_probs).std().item()
-            agent.total_rewards['ppo_ratio'] = ratio.mean().item()
-            agent.total_rewards['advantages'] = raw_advantages.mean().item()
-
-            policy_loss = -torch.min(
-                ratio * advantages,
-                torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages,
-            ).mean()
-            if torch.isnan(policy_loss).any() or torch.isinf(policy_loss).any():
-                raise RuntimeError(f'policy_loss inf!: {ratio}, {advantages}')
-            values_pred = self.policy.get_value(buffer.get_end_features(), end_edge_features_batched, buffer.get_edges())
-
-            # --- PopArt normalization and weight adjustment ---
-            old_mean, old_std = self.popart.mean, self.popart.std
-            self.popart.update(returns)
-            # If stats changed, adjust value head weights/bias
-            if self.popart.mean != old_mean or self.popart.std != old_std:
-                self.popart.adjust_weights(old_mean, old_std)
-            # Normalize returns for value loss
-            normalized_returns = self.popart.normalize(returns)
-
-            # Value loss with optional clipping for additional regularization
-            if self.value_clip_range is not None:
-                old_values = buffer.get_values()
-                values_clipped = old_values + torch.clamp(
-                    values_pred - old_values, -self.value_clip_range, self.value_clip_range
-                )
-                value_loss_unclipped = f.mse_loss(values_pred, normalized_returns)
-                value_loss_clipped = f.mse_loss(values_clipped, normalized_returns)
-                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
-            else:
-                value_loss = f.mse_loss(values_pred, normalized_returns)
-
-            agent.total_rewards['values_pred'] = values_pred.mean().item()
-            agent.total_rewards['normalized_returns'] = normalized_returns.mean().item()
-
-            # Fix placement_logits for entropy computation
-            placement_logits_for_entropy = placement_logits.clone()
-            all_inf_mask = torch.isinf(placement_logits_for_entropy).all(dim=-1)
-            if all_inf_mask.any():
-                placement_logits_for_entropy = placement_logits_for_entropy.clone()
-                placement_logits_for_entropy[all_inf_mask, 0] = 0.0
-            
-            placement_entropy, edge_entropy, army_entropy = compute_entropy(placement_logits_for_entropy, attack_logits, army_logits)
-
-            if isinstance(placement_entropy, torch.Tensor):
-                agent.total_rewards['placement_entropy'] = placement_entropy.mean().item()
-
-
-            if isinstance(edge_entropy, torch.Tensor):
-                agent.total_rewards['edge_entropy'] = edge_entropy.mean().item()
-
-            if isinstance(army_entropy, torch.Tensor):
-                agent.total_rewards['army_entropy'] = army_entropy.mean().item()
-
-            agent.total_rewards['policy_loss'] = policy_loss.mean().item()
-            agent.total_rewards['value_loss'] = value_loss.mean().item()
-
-            # Use configurable entropy coefficients and schedule
-            entropy_factor = self.entropy_coeff_start - (agent.game_number / self.entropy_decay_episodes) * self.entropy_coeff_decay
-            entropy_factor = max(entropy_factor, 0.01)  # Minimum entropy to maintain exploration
-            
-            # --- Dynamic entropy factor based on moving average of losses ---
-            # Initialize moving averages if not present
-            if not hasattr(self, 'policy_loss_ma'):
-                self.policy_loss_ma = policy_loss.mean().item()
-            if not hasattr(self, 'value_loss_ma'):
-                self.value_loss_ma = value_loss.mean().item()
-            # Update moving averages (exponential moving average)
-            ma_alpha = 0.01  # Smoothing factor (can be tuned)
-            self.policy_loss_ma = (1 - ma_alpha) * self.policy_loss_ma + ma_alpha * policy_loss.item()
-            self.value_loss_ma = (1 - ma_alpha) * self.value_loss_ma + ma_alpha * value_loss.item()
-            # Thresholds for boosting entropy (can be tuned)
-            policy_loss_thresh = 2.0
-            value_loss_thresh = 2.0
-            min_entropy_boost = 0.2  # Minimum entropy factor if instability detected
-            # Compute scheduled entropy factor
-            scheduled_entropy = self.entropy_coeff_start - (agent.game_number / self.entropy_decay_episodes) * self.entropy_coeff_decay
-            scheduled_entropy = max(scheduled_entropy, 0.01)
-            # Dynamically boost entropy if losses are high
-            if self.policy_loss_ma > policy_loss_thresh or self.value_loss_ma > value_loss_thresh:
-                entropy_factor = max(scheduled_entropy, min_entropy_boost)
-                if self.verbose_losses:
-                    print(f"⚡ Boosting entropy factor due to high moving average losses: policy_ma={self.policy_loss_ma:.4f}, value_ma={self.value_loss_ma:.4f}")
-            else:
-                entropy_factor = scheduled_entropy
-            
-            entropy_loss = (self.placement_entropy_coeff * placement_entropy + 
-                          self.edge_entropy_coeff * edge_entropy + 
-                          self.army_entropy_coeff * army_entropy)
-            agent.total_rewards['entropy_loss'] = entropy_loss.mean().item()
-            # Both policy_loss and value_loss should be minimized (i.e., both positive, same sign)
-            loss = policy_loss + self.value_loss_coeff * value_loss - entropy_factor * entropy_loss
-            agent.total_rewards['total_loss'] = loss.mean().item()
-            
-            # Print detailed loss information if verbose_losses is enabled
-            if self.verbose_losses:
-                print(f"📊 LOSS VALUES - Game {agent.game_number}, Epoch {epoch+1}")
-                print(f"   Policy Loss: {policy_loss.item():.4f}")
-                print(f"   Value Loss:  {value_loss.item():.4f}")
-                print(f"   Entropy Loss: {entropy_loss.item():.4f}")
-                print(f"   Total Loss:  {loss.mean().item():.4f}")
-                print(f"   Entropy Factor: {entropy_factor:.4f}")
-
-            if torch.isnan(loss).any() or torch.isinf(loss).any():
-                print('something went wrong with loss')
-                return
-            self.policy.to(device)
-            self.policy.edge_tensor.to(device)
-            self.optimizer.zero_grad()
-            loss.backward(retain_graph=True)
-            # 3. Clip gradients and step for all optimizers
-
-            torch.nn.utils.clip_grad_norm_(self.policy.edge_scorer.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.army_scorer.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.node_embed.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.edge_embed.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.transformer_encoder.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.post_transformer_ln.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.placement_head.parameters(), max_norm=self.gradient_clip_norm)
-            torch.nn.utils.clip_grad_norm_(self.policy.value_head.parameters(), max_norm=self.gradient_clip_norm)
-            # Print all parameter devices
-
-            for state in self.optimizer.state.values():
-                for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(device)
             self.optimizer.step()
 
-            # Enhanced gradient analysis
-            self.verifier.analyze_gradients(self.policy, agent)
+            if hasattr(agent, "total_rewards"):
+                agent.total_rewards["policy_loss"] = policy_loss.item()
+                agent.total_rewards["value_loss"] = value_loss.item()
+                agent.total_rewards["total_loss"] = total_loss.item()
+                agent.total_rewards["ppo_ratio"] = ratio.mean().item()
+                if self.monitor_gradient_norm:
+                    agent.total_rewards["grad_norm_raw"] = grad_norm_raw
+                    agent.total_rewards["grad_norm_post_scale"] = grad_norm_post_scale
+                    agent.total_rewards["grad_norm_clipped"] = clipped_norm
+                    agent.total_rewards["grad_scale_factor"] = grad_scale
 
-            # KL-divergence early stopping (replace adaptive_epochs logic)
-            kl_placement = self._compute_kl_divergence(old_placement_log_probs, new_placement_log_probs) if new_placement_log_probs.numel() > 0 and old_placement_log_probs.numel() > 0 else 0.0
-            kl_attack = self._compute_kl_divergence(old_attack_log_probs, new_attack_log_probs) if new_attack_log_probs.numel() > 0 and old_attack_log_probs.numel() > 0 else 0.0
-            agent.total_rewards['kl_placement'] = kl_placement
-            agent.total_rewards['kl_attack'] = kl_attack
-            print(f"KL-divergence (placement): {kl_placement:.4f}, (attack): {kl_attack:.4f}, threshold: {self.kl_threshold}")
-            if kl_placement > self.kl_threshold or kl_attack > self.kl_threshold:
-                print(f"Early stopping PPO epoch loop due to KL-divergence > {self.kl_threshold}")
-                break
-            # Weight change analysis (compare with previous weights)
-            self.verifier.analyze_weight_changes(self.policy, self.prev_weights, agent)
-
-            # Store current weights for next iteration comparison
-            if self.verifier.enabled:
-                self.prev_weights = {name: param.data.clone() for name, param in self.policy.named_parameters()}
-
-        # Save checkpoint using CheckpointManager if available
         if self.checkpoint_manager and self.checkpoint_manager.should_save_checkpoint(agent.game_number):
             self.checkpoint_manager.save_checkpoint(agent, agent.game_number)

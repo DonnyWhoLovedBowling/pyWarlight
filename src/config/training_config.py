@@ -63,6 +63,11 @@ class PPOConfig:
     placement_entropy_coeff: float = 0.9   # Placement entropy coefficient
     edge_entropy_coeff: float = 0.1        # Edge entropy coefficient  
     army_entropy_coeff: float = 0.003      # Army entropy coefficient
+
+    # Gradient monitoring / normalization
+    monitor_gradient_norm: bool = True     # Track gradient norms during PPO updates
+    normalize_gradients: bool = True      # Rescale gradients to target norm before clipping
+    target_grad_norm: float = 0.1          # Target norm when normalization is enabled
     
     # Reward processing
     reward_clamp_min: float = -75.0        # Minimum reward value
@@ -70,6 +75,14 @@ class PPOConfig:
     normalize_rewards: bool = True         # Enable reward normalization
     normalize_advantages: bool = True      # Enable advantage normalization
 
+    max_grad_norm = 1.0
+    adaptive_epochs = True
+    kl_threshold = 0.02
+
+    # Early stopping
+    early_stopping_enabled = True
+    patience = 3
+    min_improvement = 0.01
 
 @dataclass
 class VerificationConfig:

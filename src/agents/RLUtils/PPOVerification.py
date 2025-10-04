@@ -6,10 +6,6 @@ It can be enabled/disabled via configuration flags to keep the main PPO update l
 """
 
 import torch
-import torch.nn.functional as f
-from src.game.Phase import Phase
-from src.agents.RLUtils.RLUtils import apply_placement_masking
-
 
 class PPOVerifier:
     """

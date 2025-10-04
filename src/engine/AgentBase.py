@@ -11,7 +11,7 @@ import logging
 class AgentBase:
     agent_number: int
 
-    def is_rl_bot(self):
+    def is_rl_bot(self) -> bool:
         return False
 
     def choose_region(self, game) -> Move:

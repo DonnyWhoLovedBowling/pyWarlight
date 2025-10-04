@@ -1,126 +1,142 @@
 from dataclasses import dataclass
 import logging
 import os
-import numpy as np
 import torch
 import torch.nn.functional as f
 from src.game import Game
 
 
-class StatTracker:
-    def __init__(self, alpha=0.7):
-        self.s0 = 0
-        self.s1 = 0.0
-        self.s2 = 0.0
-        self.min = 1e9
-        self.max = -1e9
-        self.mean_val = 0.0
-        self.var_val = 0.0
-        self.alpha = alpha
-
-    def log(self, value):
-        self.s0 += 1
-        self.s1 += value
-        self.s2 += value * value
-        if value > self.max:
-            self.max = value
-        if value < self.min:
-            self.min = value
-
-        # Update moving average and variance
-        if self.s0 == 1:
-            self.mean_val = value
-            self.var_val = 0.0
-        else:
-            prev_mean = self.mean_val
-            self.mean_val = (1 - self.alpha) * self.mean_val + self.alpha * value
-            self.var_val = (1 - self.alpha) * self.var_val + self.alpha * (value - prev_mean) ** 2
-
-    def std(self):
-        if self.s0 > 1:
-            return np.sqrt(self.var_val)
-        else:
-            return 0.0
-
-    def mean(self):
-        return self.mean_val
-
-    def get_min(self):
-        return self.min
-
-    def get_max(self):
-        return self.max
-
 class RewardNormalizer:
-    def __init__(self, alpha=0.1):
+    """Tracks running statistics for reward normalization."""
+
+    def __init__(self, alpha: float = 0.1):
+        self.alpha = alpha
         self.mean = 0.0
         self.var = 1.0
         self.count = 1e-8
-        self.alpha = alpha
 
-    def update(self, rewards: torch.Tensor):
+    def update(self, rewards: torch.Tensor) -> None:
+        if rewards is None or rewards.numel() == 0:
+            return
 
+        rewards = rewards.detach()
         batch_mean = rewards.mean().item()
-        batch_var = rewards.var(unbiased=False).item()
+        batch_var = rewards.var(unbiased=False).item() if rewards.numel() > 1 else 0.0
         batch_count = rewards.numel()
 
-        delta = batch_mean - self.mean
         total_count = self.count + batch_count
-
+        delta = batch_mean - self.mean
         new_mean = self.mean + delta * batch_count / total_count
+
         m_a = self.var * self.count
         m_b = batch_var * batch_count
-        M2 = m_a + m_b + delta ** 2 * self.count * batch_count / total_count
-        new_var = M2 / total_count
+        m2 = m_a + m_b + (delta ** 2) * self.count * batch_count / total_count
+        new_var = m2 / max(total_count, 1e-8)
 
-        # Exponential moving average update
-        self.mean = (1 - self.alpha) * self.mean + self.alpha * batch_mean
-        self.var = (1 - self.alpha) * self.var + self.alpha * batch_var
+        self.mean = (1 - self.alpha) * self.mean + self.alpha * new_mean
+        self.var = max((1 - self.alpha) * self.var + self.alpha * new_var, 1e-8)
         self.count = total_count
 
-    def normalize(self, rewards):
-        return (rewards - self.mean) / (self.var ** 0.5 + 1e-8)
 
 @dataclass
-class PrevStateBuffer:    
+class PrevStateBuffer:
+    regions: set[int]
+    prev_continents: int
+    prev_armies: int
+    prev_armies_enemy: int
+
     def __init__(self, prev_state: Game, player_id: int):
-        self.regions = set([r.get_id() for r in prev_state.regions_owned_by(player_id)])
+        self.regions = set(r.get_id() for r in prev_state.regions_owned_by(player_id))
         self.prev_continents = prev_state.get_bonus_armies(player_id)
         self.prev_armies = prev_state.number_of_armies_owned(player_id)
-        self.prev_armies_enemy = sum(
-                [prev_state.number_of_armies_owned(pid) for pid in range(1, prev_state.config.num_players + 1) if
-                 pid != player_id]
-                )
+
+        enemy_armies = 0
+        num_players = getattr(prev_state.config, "num_players", 2)
+        for pid in range(1, num_players + 1):
+            if pid == player_id:
+                continue
+            enemy_armies += prev_state.number_of_armies_owned(pid)
+        self.prev_armies_enemy = enemy_armies
 
 
-def pad_tensor_list(tensor_list, pad_value=-1, target_device=None):
-    """Pad list of tensors to same shape"""
+def pad_tensor_list(tensor_list, pad_value=0, target_device=None):
+    """Pad a list of tensors (possibly jagged) to a uniform shape."""
     if not tensor_list:
-        return torch.tensor([])
+        device = target_device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device(device)
+        return torch.empty((0,), dtype=torch.float32, device=device)
 
-    # Determine target device
     if target_device is None:
-        target_device = tensor_list[0].device if tensor_list[0].numel() > 0 else 'cpu'
+        target_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    elif isinstance(target_device, str):
+        target_device = torch.device(target_device)
 
-    # Find max dimensions
-    max_dim0 = max(t.size(0) if t.numel() > 0 else 0 for t in tensor_list)
-    # Check if we're dealing with 2D tensors by examining non-empty tensors
-    is_2d = any(len(t.shape) > 1 and t.numel() > 0 for t in tensor_list)
+    processed = []
+    dtype = None
+    for item in tensor_list:
+        if item is None:
+            tensor = torch.tensor([], device=target_device)
+        elif isinstance(item, torch.Tensor):
+            tensor = item
+        else:
+            tensor = torch.tensor(item)
+
+        if dtype is None and tensor.numel() > 0:
+            dtype = tensor.dtype
+        processed.append(tensor)
+
+    if dtype is None:
+        if processed[0].numel() > 0:
+            dtype = processed[0].dtype
+        else:
+            if isinstance(pad_value, float):
+                dtype = torch.float32
+            elif isinstance(pad_value, bool):
+                dtype = torch.bool
+            else:
+                dtype = torch.long
+
+    max_dim0 = 0
+    max_dim1 = 0
+    is_2d = False
+
+    for tensor in processed:
+        if tensor.numel() == 0:
+            max_dim0 = max(max_dim0, 1)
+            continue
+
+        if tensor.dim() == 0:
+            max_dim0 = max(max_dim0, 1)
+        else:
+            max_dim0 = max(max_dim0, tensor.size(0))
+            if tensor.dim() > 1:
+                is_2d = True
+                max_dim1 = max(max_dim1, tensor.size(1))
 
     if is_2d:
-        max_dim1 = max(t.size(1) if len(t.shape) > 1 and t.numel() > 0 else 0 for t in tensor_list)
-        padded = torch.full((len(tensor_list), max_dim0, max_dim1), pad_value,
-                            dtype=tensor_list[0].dtype, device=target_device)
+        padded = torch.full((len(processed), max_dim0, max_dim1), pad_value, dtype=dtype, device=target_device)
     else:
-        padded = torch.full((len(tensor_list), max_dim0), pad_value,
-                            dtype=tensor_list[0].dtype, device=target_device)
+        padded = torch.full((len(processed), max_dim0), pad_value, dtype=dtype, device=target_device)
 
-    for i, tensor in enumerate(tensor_list):
-        if tensor.numel() > 0:
-            if len(tensor.shape) > 1:
-                padded[i, :tensor.size(0), :tensor.size(1)] = tensor
+    for idx, tensor in enumerate(processed):
+        if tensor.device != target_device:
+            tensor = tensor.to(target_device)
+
+        if tensor.numel() == 0:
+            continue
+
+        if tensor.dim() == 0:
+            if is_2d:
+                padded[idx, 0, 0] = tensor.to(dtype)
             else:
-                padded[i, :tensor.size(0)] = tensor
+                padded[idx, 0] = tensor.to(dtype)
+        elif tensor.dim() == 1:
+            if is_2d:
+                padded[idx, :tensor.size(0), 0] = tensor.to(dtype)
+            else:
+                padded[idx, :tensor.size(0)] = tensor.to(dtype)
+        else:
+            padded[idx, :tensor.size(0), :tensor.size(1)] = tensor.to(dtype)
 
     return padded
 
@@ -140,28 +156,105 @@ class RolloutBuffer:
         self.post_placement_node_features_list = []
         self.end_features_list = []
         # Store region ownership for proper masking during PPO updates
+        self.ownership_masks = []
         self.owned_regions_list = []
         self.starting_edge_features = []
         self.post_placement_edge_features = []
         self.end_edge_features = []
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.armies_left = []  # Store armies left before attacks for each step
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._pending_edge_tensor = None
+        self._pending_ownership_mask = None
+
+    def _commit_pending_transition(self):
+        """Ensure per-transition metadata is committed before storing features."""
+        target_index = len(self.starting_node_features_list)
+
+        if len(self.edges) <= target_index:
+            if self._pending_edge_tensor is not None:
+                self.edges.append(self._pending_edge_tensor)
+            else:
+                self.edges.append(torch.empty((0, 2), dtype=torch.long))
+        elif self._pending_edge_tensor is not None:
+            self.edges[target_index] = self._pending_edge_tensor
+        self._pending_edge_tensor = None
+
+        if len(self.ownership_masks) <= target_index:
+            if self._pending_ownership_mask is not None:
+                self.ownership_masks.append(self._pending_ownership_mask)
+            else:
+                self.ownership_masks.append(None)
+        elif self._pending_ownership_mask is not None:
+            self.ownership_masks[target_index] = self._pending_ownership_mask
+        self._pending_ownership_mask = None
 
     def get_edges(self):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # Pad all edge tensors to num_edges edges
-        # padded_edges = []
-        # for edges in self.edges:
-        #     if len(edges) < num_edges:
-        #         padding = torch.full((num_edges - len(edges), 2), -1, dtype=edges.dtype)
-        #         padded = torch.cat([edges, padding], dim=0)
-        #     else:
-        #         padded = edges[:num_edges]  # Truncate if somehow > num_edges
-        #     padded_edges.append(padded)
-        return torch.stack(self.edges).to(device)
+        """Return edge indices padded to a consistent (batch, num_edges, 2) shape."""
+        if not self.edges:
+            return torch.empty((0, 0, 2), dtype=torch.long, device=self.device)
+
+        target_device = self.device
+
+        normalized_edges = []
+        max_edges = 0
+
+        for edges in self.edges:
+            if isinstance(edges, torch.Tensor):
+                tensor_edges = edges.to(dtype=torch.long)
+            else:
+                tensor_edges = torch.tensor(edges, dtype=torch.long)
+
+            if tensor_edges.numel() == 0:
+                tensor_edges = tensor_edges.new_empty((0, 2))
+            elif tensor_edges.dim() == 1:
+                if tensor_edges.numel() % 2 != 0:
+                    raise ValueError(f"Edge tensor with shape {tensor_edges.shape} cannot be reshaped into pairs")
+                tensor_edges = tensor_edges.view(-1, 2)
+            elif tensor_edges.dim() == 2:
+                if tensor_edges.size(-1) == 2:
+                    pass  # already (E, 2)
+                elif tensor_edges.size(0) == 2:
+                    tensor_edges = tensor_edges.t()
+                else:
+                    raise ValueError(f"Unexpected edge tensor shape {tensor_edges.shape}; expected (E, 2) or (2, E)")
+            else:
+                raise ValueError(f"Edge tensor must be 1D or 2D, got shape {tensor_edges.shape}")
+
+            max_edges = max(max_edges, tensor_edges.size(0))
+            normalized_edges.append(tensor_edges)
+
+        padded_edges = []
+        for tensor_edges in normalized_edges:
+            if tensor_edges.size(0) < max_edges:
+                pad_rows = max_edges - tensor_edges.size(0)
+                padding = torch.full((pad_rows, 2), -1, dtype=tensor_edges.dtype, device=tensor_edges.device)
+                tensor_edges = torch.cat([tensor_edges, padding], dim=0)
+            elif tensor_edges.size(0) > max_edges:
+                tensor_edges = tensor_edges[:max_edges]
+
+            if tensor_edges.device != target_device:
+                tensor_edges = tensor_edges.to(target_device)
+            padded_edges.append(tensor_edges)
+
+        stacked = torch.stack(padded_edges)  # (batch, num_edges, 2)
+        return stacked
 
     def get_attacks(self):
-        padded = pad_tensor_list(self.attacks, pad_value=-1, target_device=self.device)
-        return padded
+        """
+        Returns attacks in their original dictionary format for compatibility
+        with AttackDecoder.recompute_logprobs().
+        
+        For single episodes, returns the dict directly.
+        For batched episodes, returns a list of dicts (one per episode).
+        """
+        if len(self.attacks) == 0:
+            return {}
+        elif len(self.attacks) == 1:
+            # Single episode - return the dict directly
+            return self.attacks[0]
+        else:
+            # Multiple episodes - return list of dicts
+            return self.attacks
 
     def get_placements(self):
         padded = pad_tensor_list(self.placements, pad_value=-1, target_device=self.device)
@@ -170,12 +263,14 @@ class RolloutBuffer:
     def get_placement_log_probs(self):
         if not self.placement_log_probs:
             return torch.tensor([], dtype=torch.float, device=self.device)
-        return pad_tensor_list(self.placement_log_probs, pad_value=0.0, target_device=self.device)
+        placement_log_probs = pad_tensor_list(self.placement_log_probs, pad_value=0, target_device=self.device)
+        return placement_log_probs.detach()
 
     def get_attack_log_probs(self):
         if not self.attack_log_probs:
             return torch.tensor([], dtype=torch.float, device=self.device)
-        return pad_tensor_list(self.attack_log_probs, pad_value=0.0, target_device=self.device)
+        attack_log_probs = pad_tensor_list(self.attack_log_probs, pad_value=0, target_device=self.device)
+        return attack_log_probs.detach()
 
     def get_rewards(self):
         return torch.tensor(self.rewards, dtype=torch.float, device=self.device)
@@ -233,14 +328,68 @@ class RolloutBuffer:
 
         return torch.stack(self.end_edge_features).to(self.device)
 
+    def get_ownership_mask(self):
+        """Return stacked ownership masks aligned with stored transitions."""
+        transition_count = len(self.starting_node_features_list)
+        if transition_count == 0:
+            # Nothing recorded yet
+            return torch.empty((0, 0), dtype=torch.bool, device=self.device)
+
+        masks = []
+        for idx in range(transition_count):
+            num_nodes = self.starting_node_features_list[idx].size(0)
+            base_mask = self.ownership_masks[idx] if idx < len(self.ownership_masks) else None
+
+            if base_mask is None:
+                mask_tensor = torch.ones(num_nodes, dtype=torch.bool, device=self.device)
+            else:
+                if not isinstance(base_mask, torch.Tensor):
+                    mask_tensor = torch.as_tensor(base_mask, dtype=torch.bool)
+                else:
+                    mask_tensor = base_mask.clone().detach().to(dtype=torch.bool)
+
+                mask_tensor = mask_tensor.flatten()
+
+                if mask_tensor.numel() != num_nodes:
+                    if mask_tensor.numel() > num_nodes:
+                        mask_tensor = mask_tensor[:num_nodes]
+                    else:
+                        pad = torch.ones(num_nodes - mask_tensor.numel(), dtype=torch.bool, device=mask_tensor.device)
+                        mask_tensor = torch.cat([mask_tensor, pad], dim=0)
+
+                mask_tensor = mask_tensor.to(self.device)
+
+            masks.append(mask_tensor)
+
+        return torch.stack(masks, dim=0)
+    
+    def get_armies_left(self):
+        """Return the armies left before attacks for each episode"""
+        if not self.armies_left or all(al is None for al in self.armies_left):
+            return torch.empty((0, 0), dtype=torch.long, device=self.device)
+        
+        return pad_tensor_list(self.armies_left, pad_value=-1, target_device=self.device)
     def add(self, edges, attacks, placements, placement_log_probs, attack_log_probs, reward,
             value, done, starting_node_features, post_placement_node_features, end_features,
             owned_regions=None, starting_edge_features=None, post_placement_edge_features = None, end_edge_features=None):
-        self.edges.append(edges)
-        attacks_tensor = torch.tensor(attacks, dtype=torch.long)
-        placements_tensor = torch.tensor(placements, dtype=torch.long)
-        self.attacks.append(attacks_tensor)
-        self.placements.append(placements_tensor)
+        if isinstance(edges, torch.Tensor):
+            self.edges.append(edges.clone().detach())
+        else:
+            self.edges.append(torch.tensor(edges, dtype=torch.long))
+
+        if isinstance(attacks, dict):
+            cloned_attacks = {
+                key: (value.clone().detach() if isinstance(value, torch.Tensor) else value)
+                for key, value in attacks.items()
+            }
+            self.attacks.append(cloned_attacks)
+        elif isinstance(attacks, torch.Tensor):
+            self.attacks.append(attacks.clone().detach())
+        else:
+            self.attacks.append(torch.tensor(attacks, dtype=torch.long))
+
+        placements_tensor = torch.as_tensor(placements, dtype=torch.long)
+        self.placements.append(placements_tensor.clone())
         
         # Store owned regions for masking during PPO updates
         if owned_regions is not None:
@@ -250,29 +399,112 @@ class RolloutBuffer:
         
         # Store individual log probabilities
         if isinstance(placement_log_probs, torch.Tensor):
-            self.placement_log_probs.append(placement_log_probs.detach().cpu())
+            self.placement_log_probs.append(placement_log_probs.detach().clone())
         else:
             self.placement_log_probs.append(torch.tensor(placement_log_probs, dtype=torch.float))
             
         if isinstance(attack_log_probs, torch.Tensor):
-            self.attack_log_probs.append(attack_log_probs.detach().cpu())
+            self.attack_log_probs.append(attack_log_probs.detach().clone())
         else:
             self.attack_log_probs.append(torch.tensor(attack_log_probs, dtype=torch.float))
             
-        self.rewards.append(reward)
-        self.values.append(value)
+        if isinstance(reward, torch.Tensor):
+            self.rewards.append(reward.detach().cpu().item())
+        else:
+            self.rewards.append(float(reward))
+
+        if isinstance(value, torch.Tensor):
+            self.values.append(value.detach().cpu().item())
+        else:
+            self.values.append(float(value))
         self.dones.append(done)
         
         # Store individual tensors instead of concatenating
-        self.starting_node_features_list.append(starting_node_features)
-        self.post_placement_node_features_list.append(post_placement_node_features)
-        self.end_features_list.append(end_features)
-        self.starting_edge_features.append(starting_edge_features)
-        self.post_placement_edge_features.append(post_placement_edge_features)
+        if isinstance(starting_node_features, torch.Tensor):
+            self.starting_node_features_list.append(starting_node_features.clone().detach())
+        if isinstance(post_placement_node_features, torch.Tensor):
+            self.post_placement_node_features_list.append(post_placement_node_features.clone().detach())
+        if isinstance(end_features, torch.Tensor):
+            self.end_features_list.append(end_features.clone().detach())
+        if isinstance(starting_edge_features, torch.Tensor):
+            self.starting_edge_features.append(starting_edge_features.clone().detach())
+        if isinstance(post_placement_edge_features, torch.Tensor):
+            self.post_placement_edge_features.append(post_placement_edge_features.clone().detach())
+        if isinstance(end_edge_features, torch.Tensor):
+            self.end_edge_features.append(end_edge_features.clone().detach())
 
-        self.end_edge_features.append(end_edge_features)
+    def add_attacks(self, attacks, attack_log_probs, post_placement_node_features, post_placement_edge_features, armies_left):
+        if isinstance(attacks, dict):
+            stored_attacks = {
+                key: (value.clone().detach() if isinstance(value, torch.Tensor) else value)
+                for key, value in attacks.items()
+            }
+        elif isinstance(attacks, torch.Tensor):
+            stored_attacks = attacks.clone().detach()
+        else:
+            stored_attacks = attacks
+        self.attacks.append(stored_attacks)
 
+        if isinstance(post_placement_node_features, torch.Tensor):
+            self.post_placement_node_features_list.append(post_placement_node_features.clone().detach())
+        if isinstance(post_placement_edge_features, torch.Tensor):
+            self.post_placement_edge_features.append(post_placement_edge_features.clone().detach())  
+        if isinstance(armies_left, torch.Tensor):
+            self.armies_left.append(armies_left.clone().detach())
+        else:
+            self.armies_left.append(armies_left)
 
+        if isinstance(attack_log_probs, torch.Tensor):
+            self.attack_log_probs.append(attack_log_probs.clone().detach())
+        else:
+            self.attack_log_probs.append(torch.tensor(attack_log_probs, dtype=torch.float))
+        
+    def add_placements(self, placements, placement_log_probs, starting_node_features, starting_edge_features):
+        self._commit_pending_transition()
+
+        placements_tensor = torch.as_tensor(placements, dtype=torch.long)
+        self.placements.append(placements_tensor.clone())
+
+        if isinstance(starting_node_features, torch.Tensor):
+            self.starting_node_features_list.append(starting_node_features.clone().detach())
+        if isinstance(starting_edge_features, torch.Tensor):
+            self.starting_edge_features.append(starting_edge_features.clone().detach())  
+
+        if isinstance(placement_log_probs, torch.Tensor):
+            self.placement_log_probs.append(placement_log_probs.clone().detach())
+        else:
+            self.placement_log_probs.append(torch.tensor(placement_log_probs, dtype=torch.float))
+    
+    def add_init_vars(self, edge_tensor, ownership_mask):
+        if isinstance(edge_tensor, torch.Tensor):
+            self._pending_edge_tensor = edge_tensor.clone().detach()
+        else:
+            self._pending_edge_tensor = torch.tensor(edge_tensor, dtype=torch.long)
+
+        if isinstance(ownership_mask, torch.Tensor):
+            self._pending_ownership_mask = ownership_mask.clone().detach().to(dtype=torch.bool).cpu()
+        elif ownership_mask is None:
+            self._pending_ownership_mask = None
+        else:
+            self._pending_ownership_mask = torch.tensor(ownership_mask, dtype=torch.bool)
+    
+    def add_end_vars(self, reward, value, done, end_node_features, end_edge_features):
+        if isinstance(reward, torch.Tensor):
+            self.rewards.append(reward.detach().cpu().item())
+        else:
+            self.rewards.append(float(reward))
+
+        if isinstance(value, torch.Tensor):
+            self.values.append(value.detach().cpu().item())
+        else:
+            self.values.append(float(value))
+        self.dones.append(done)
+
+        if isinstance(end_node_features, torch.Tensor):
+            self.end_features_list.append(end_node_features.clone().detach())
+        if isinstance(end_edge_features, torch.Tensor):
+            self.end_edge_features.append(end_edge_features.clone().detach())
+        
     def clear(self):
         self.__init__()
         
@@ -281,41 +513,7 @@ class RolloutBuffer:
         return self.owned_regions_list
 
     def size(self) -> int:
-        return len(self.rewards)
-
-
-def apply_placement_masking(placement_logits, owned_regions_list):
-    """
-    Apply the same masking to placement logits as used during action selection.
-    
-    Args:
-        placement_logits: [batch_size, num_nodes] - raw placement logits from model
-        owned_regions_list: list of tensors, each containing region IDs owned by agent
-        
-    Returns:
-        masked_placement_logits: [batch_size, num_nodes] - logits with non-owned regions masked to -inf
-    """
-    if placement_logits.dim() != 2:
-        raise ValueError(f"Expected placement_logits to be 2D [batch_size, num_nodes], got {placement_logits.shape}")
-    
-    batch_size, num_nodes = placement_logits.shape
-    device = placement_logits.device
-    
-    # Clone to avoid modifying the original
-    masked_logits = placement_logits.clone()
-    
-    for batch_idx, owned_regions in enumerate(owned_regions_list):
-        if owned_regions is not None:
-            # Create mask for all regions
-            all_regions = set(range(num_nodes))
-            owned_regions_set = set(owned_regions.tolist() if isinstance(owned_regions, torch.Tensor) else owned_regions)
-            not_owned = list(all_regions.difference(owned_regions_set))
-            
-            # Mask non-owned regions to -inf
-            if not_owned:
-                masked_logits[batch_idx, not_owned] = float('-inf')
-    
-    return masked_logits
+        return len(self.starting_node_features_list)
 
 
 def load_checkpoint(policy, optimizer, path="checkpoint.pt"):
@@ -602,6 +800,7 @@ def compute_individual_log_probs(
     all_inf_mask = torch.isinf(placement_logits).all(dim=-1)
     if all_inf_mask.any():
         # For all-inf rows, set one element to 0 to make log_softmax work
+        placement_logits = placement_logits.clone()
         placement_logits[all_inf_mask, 0] = 0.0
     
     placement_log_probs_full = f.log_softmax(placement_logits, dim=-1)  # [batch_size, num_nodes]

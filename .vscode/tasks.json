@@ -17,8 +17,10 @@
                 "world",
                 "-config",
                 "transformer_actor_critic_kl_max_batch_size_global_sampling"
-
             ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "group": {
                 "kind": "build",
                 "isDefault": true

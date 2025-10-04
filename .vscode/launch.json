@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Run simulation",
             "type": "python",
@@ -12,7 +13,7 @@
                 "-sim",
                 "10000",
                 "-map",
-                "World",
+                "world",
                 "-config",
                 "transformer_actor_critic_kl_max_batch_size_global_sampling"
             ],
