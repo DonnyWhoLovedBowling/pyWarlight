@@ -4,6 +4,7 @@ Saves and loads: model state, optimizer state, reward normalizer, game number, a
 """
 
 import os
+import re
 import torch
 import pickle
 from datetime import datetime
@@ -39,6 +40,28 @@ class CheckpointManager:
         else:
             return False
     
+    def _extract_game_number_from_filename(self, checkpoint_path: str) -> Optional[int]:
+        """Extract game number from checkpoint filename.
+        
+        Checkpoint filenames have the format: checkpoint_game_{game_number}_{timestamp}.pth
+        
+        Args:
+            checkpoint_path: Path to the checkpoint file
+            
+        Returns:
+            Game number if found in filename, None otherwise
+        """
+        try:
+            filename = os.path.basename(checkpoint_path)
+            # Pattern: checkpoint_game_{number}_{timestamp}.pth
+            match = re.search(r'checkpoint_game_(\d+)_', filename)
+            if match:
+                game_number = int(match.group(1))
+                return game_number
+        except (ValueError, AttributeError) as e:
+            logging.debug(f"Could not extract game_number from filename {checkpoint_path}: {e}")
+        return None
+    
     def find_latest_checkpoint(self, experiment_name: Optional[str] = None) -> Optional[str]:
         """Find the latest checkpoint for an experiment"""
         if experiment_name is None:
@@ -62,7 +85,11 @@ class CheckpointManager:
         return latest_checkpoint
     
     def save_checkpoint(self, agent, game_number: int, force: bool = False) -> Optional[str]:
-        """Save comprehensive checkpoint"""
+        """Save comprehensive checkpoint.
+        
+        NOTE: The filename format 'checkpoint_game_{game_number}_{timestamp}.pth' is used
+        as a fallback to extract game_number if it's missing from checkpoint data.
+        """
         if not force and not self.should_save_checkpoint(game_number):
             return None
         self.n_saved += 1
@@ -71,8 +98,11 @@ class CheckpointManager:
         checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_filename)
         
         # Collect all state information
+        # Get actual game number from agent (in case it's different from parameter)
+        actual_game_number = getattr(agent, 'game_number', game_number)
+        
         checkpoint_data = {
-            "game_number": game_number,
+            "game_number": actual_game_number,  # Save actual game number at top level
             "timestamp": timestamp,
             "experiment_name": self.experiment_name,
             "config": self._serialize_config(self.config),
@@ -88,7 +118,7 @@ class CheckpointManager:
             # Agent-specific state
             "agent_state": {
                 "total_rewards": getattr(agent, 'total_rewards', {}),
-                "game_number": getattr(agent, 'game_number', game_number),
+                "game_number": actual_game_number,  # Also save in agent_state for consistency
                 "turns_count": getattr(agent, 'turns_count', 0),
                 "placement_count": getattr(agent, 'placement_count', 0),
                 "attack_count": getattr(agent, 'attack_count', 0)
@@ -126,38 +156,67 @@ class CheckpointManager:
                 agent.model.load_state_dict(checkpoint_data["model_state_dict"], strict=False)
                 print("   ✅ Model state loaded")
             
-            # Load optimizer state
+            # Load optimizer state (non-critical - don't fail entire load if this fails)
             if load_config.get("optimizer", True):
-                agent.optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
-                print("   ✅ Optimizer state loaded")
+                try:
+                    agent.optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
+                    print("   ✅ Optimizer state loaded")
+                except (ValueError, KeyError, RuntimeError) as opt_error:
+                    print(f"   ⚠️  Failed to load optimizer state: {opt_error}")
+                    print(f"   ℹ️  Continuing with fresh optimizer (learning rate will be reset)")
 
             # Load game number
             if load_config.get("game_number", True):
-                agent.game_number = checkpoint_data.get("game_number", 0)
-                print(f"   ✅ Game number loaded: {agent.game_number}")
+                # Try to get game_number from checkpoint (with fallback to agent_state)
+                loaded_game_number = checkpoint_data.get("game_number")
+                if loaded_game_number is None:
+                    # Fallback 1: try to get from agent_state
+                    agent_state = checkpoint_data.get("agent_state", {})
+                    loaded_game_number = agent_state.get("game_number")
+                
+                if loaded_game_number is None or loaded_game_number <= 0:
+                    # Fallback 2: try to extract from checkpoint filename
+                    loaded_game_number = self._extract_game_number_from_filename(checkpoint_path)
+                    if loaded_game_number is not None:
+                        print(f"   ℹ️  Game number not found in checkpoint data, extracted from filename: {loaded_game_number}")
+                
+                if loaded_game_number is not None and loaded_game_number > 0:
+                    agent.game_number = loaded_game_number
+                    print(f"   ✅ Game number loaded: {agent.game_number}")
+                else:
+                    print(f"   ⚠️  Game number not found in checkpoint or filename ({loaded_game_number}), keeping current: {agent.game_number}")
             
-            # Load PPO agent state
+            # Load PPO agent state (non-critical)
             if load_config.get("ppo_state", True):
-                self._restore_ppo_agent_state(
-                    agent.ppo_agent, 
-                    checkpoint_data.get("ppo_agent_state", {})
-                )
-                print("   ✅ PPO agent state loaded")
+                try:
+                    self._restore_ppo_agent_state(
+                        agent.ppo_agent, 
+                        checkpoint_data.get("ppo_agent_state", {})
+                    )
+                    print("   ✅ PPO agent state loaded")
+                except Exception as ppo_error:
+                    print(f"   ⚠️  Failed to load PPO agent state: {ppo_error}")
             
-            # Load stat trackers
+            # Load stat trackers (non-critical)
             if load_config.get("stat_trackers", True):
-                self._restore_stat_tracker_states(agent, checkpoint_data.get("stat_trackers", {}))
-                print("   ✅ Stat trackers loaded")
+                try:
+                    self._restore_stat_tracker_states(agent, checkpoint_data.get("stat_trackers", {}))
+                    print("   ✅ Stat trackers loaded")
+                except Exception as stat_error:
+                    print(f"   ⚠️  Failed to load stat trackers: {stat_error}")
             
-            # Load agent-specific state
+            # Load agent-specific state (non-critical)
             if load_config.get("training_state", True):
-                agent_state = checkpoint_data.get("agent_state", {})
-                if hasattr(agent, 'total_rewards'):
-                    agent.total_rewards.update(agent_state.get("total_rewards", {}))
-                agent.turns_count = agent_state.get("turns_count", 0)
-                agent.placement_count = agent_state.get("placement_count", 0)
-                agent.attack_count = agent_state.get("attack_count", 0)
-                print("   ✅ Training state loaded")
+                try:
+                    agent_state = checkpoint_data.get("agent_state", {})
+                    if hasattr(agent, 'total_rewards'):
+                        agent.total_rewards.update(agent_state.get("total_rewards", {}))
+                    agent.turns_count = agent_state.get("turns_count", 0)
+                    agent.placement_count = agent_state.get("placement_count", 0)
+                    agent.attack_count = agent_state.get("attack_count", 0)
+                    print("   ✅ Training state loaded")
+                except Exception as training_error:
+                    print(f"   ⚠️  Failed to load training state: {training_error}")
             
             return True
             

@@ -5,6 +5,7 @@ from time import time
 from src.agents.Attila import Attila
 from src.agents.Napoleon import Napoleon
 from src.agents.Julius import Julius
+from src.agents.Saladin import Saladin
 
 from src.agents.RLGNNAgent import RLGNNAgent
 from src.agents.RandomAgent import RandomAgent

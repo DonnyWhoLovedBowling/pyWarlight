@@ -22,6 +22,15 @@ class ModelConfig:
     max_attacks_per_turn: int = 12
     device: str = 'cpu'  # 'cpu', 'cuda', or 'auto'
     
+    # Device placement strategy
+    # Options:
+    # - "training_only": Only PPO updates on GPU, inference on CPU (minimal transfers, slower inference)
+    # - "inference_and_training": Inference + training on GPU, environment on CPU (recommended for transformers)
+    device_placement_strategy: str = "training_only"
+
+    # Memory management
+    pin_memory: bool = True  # Use pinned memory for faster CPU->GPU transfers
+
     # Model architecture selection
     model_type: str = 'standard'  # 'standard', 'residual', 'sage', 'transformer'
     edge_feat_dim: int = 5  # Number of edge features (default 0 for backward compatibility)
@@ -34,6 +43,22 @@ class ModelConfig:
         if self.device == 'auto':
             return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         return torch.device(self.device)
+
+    def get_inference_device(self) -> torch.device:
+        """Get device for inference operations"""
+        if self.device_placement_strategy == "training_only":
+            return torch.device('cpu')
+        else:  # inference_and_training
+            return self.get_device()
+
+    def get_training_device(self) -> torch.device:
+        """Get device for training/PPO updates"""
+        # Both strategies use GPU for training
+        return self.get_device()
+
+    def should_move_model_for_inference(self) -> bool:
+        """Check if we need to move model between inference and training"""
+        return self.device_placement_strategy == "training_only"
 
 
 @dataclass
@@ -168,35 +193,55 @@ class LoggingConfig:
 class GameConfig:
     """Configuration for game-specific settings"""
     # Reward system weights (from compute_rewards)
-    region_gain_reward: float = 0.5               # Reward per region gained
-    region_loss_penalty: float = 0.0125           # Penalty per region lost
-    continent_bonus_multiplier: float = 2.0       # Multiplier for continent bonuses
-    army_efficiency_reward: float = 0.1           # Reward for efficient army usage
-    action_base_reward: float = 0.005             # Base reward for taking actions
-    action_efficiency_multiplier: float = 0.01    # Multiplier for action efficiency
-    long_game_penalty: float = 0.02               # Per-turn penalty for long games
-    win_reward: float = 75.0                      # Reward for winning
-    win_speed_bonus: float = 10.0                 # Bonus for fast wins (max)
-    win_speed_decay: float = 0.1                  # Decay rate for speed bonus
-    loss_penalty: float = 50.0                    # Penalty for losing
-    only_armies_used = False
+    # 1️⃣ Region control rewards
+    region_gain_reward: float = 0.5               # Reward per region gained (was 0.05, increased 10x for aggression)
+    region_loss_penalty: float = 0.05             # Penalty per region lost (was 0.025, doubled to discourage losses)
 
-    # Placement rewards
-    placement_next_to_enemy_bonus: float = 0.1    # Bonus for placing next to enemies
-    placement_safe_penalty: float = 0.05          # Penalty for placing in safe regions
-    
-    # Transfer and positioning rewards
-    transfer_proximity_multiplier: float = 0.02   # Reward for moving closer to enemies
-    transfer_proximity_decay: float = 0.3         # Exponential decay for proximity
-    passivity_penalty_rate: float = 0.01          # Penalty rate for being passive
-    
-    # Attack rewards
-    multi_side_attack_bonus: float = 0.05         # Bonus for multi-directional attacks
-    overstack_penalty_rate: float = 0.000005     # Penalty rate for overstacking
-    
-    # Action sampling
-    use_temperature_scaling: bool = False          # Enable temperature scaling
-    temperature: float = 1.0                      # Temperature for action sampling
+    # 2️⃣ Continent bonus rewards
+    continent_bonus_multiplier: float = 0.2       # Multiplier for continent bonuses (was 0.02, increased 10x)
+
+    # 3️⃣ Army dynamics rewards
+    army_destruction_weight: float = 10.0         # Weight for army destruction vs loss difference (unchanged)
+    army_efficiency_normalization: bool = True    # Normalize by total armies (unchanged)
+
+    # 4️⃣ Action dynamics rewards
+    action_base_reward: float = 0.05              # Base reward for taking actions (was 0.005, increased 10x)
+    action_efficiency_multiplier: float = 0.2     # Multiplier for action efficiency (was 0.02, increased 10x)
+
+    # 5️⃣ Long game penalty
+    long_game_threshold: int = 30                # Turn threshold for long game penalty
+    long_game_penalty: float = 0.05               # Per-turn penalty for long games (unchanged)
+
+    # 6️⃣ Win/Loss rewards
+    win_reward: float = 75.0                      # Reward for winning (unchanged)
+    win_speed_bonus_max: float = 25.0             # Maximum bonus for fast wins (unchanged)
+    win_speed_decay: float = 0.5                  # Decay rate for speed bonus (unchanged)
+    loss_penalty: float = 50.0                    # Penalty for losing (unchanged)
+
+    # 7️⃣ Transfer rewards
+    transfer_proximity_multiplier: float = 0.05   # Reward for moving closer to enemies (was 0.005, increased 10x)
+    transfer_proximity_decay: float = 0.3         # Exponential decay for proximity (unchanged)
+
+    # 8️⃣ Placement rewards
+    placement_next_to_enemy_bonus: float = 0.2    # Bonus for placing next to enemies (was 0.02, increased 10x)
+    placement_safe_penalty: float = 0.1           # Penalty for placing in safe regions (was 0.01, increased 10x)
+    placement_normalization_factor: bool = True   # Normalize by number of regions (unchanged)
+
+    # 9️⃣ Overstack penalty
+    overstack_penalty_rate: float = 0.00005       # Penalty rate for overstacking (was 0.000005, increased 10x)
+
+    # 🔟 Multi-side attack rewards
+    multi_side_attack_bonus: float = 0.5          # Bonus for multi-directional attacks (was 0.05, increased 10x)
+
+    # 🔥 Momentum reward (for consecutive successful attacks)
+    momentum_multiplier: float = 1.0              # Multiplier for consecutive attack wins (higher = more momentum reward)
+
+    # Special modes
+    only_armies_used: bool = False                # Use only armies as reward (debugging mode)
+
+    # Action sampling (kept from original)
+    use_temperature_scaling: bool = False
+    temperature: float = 1.0
 
 @dataclass
 class TrainingConfig:
@@ -574,6 +619,10 @@ class ConfigFactory:
             "transformer_actor_critic_kl_max_batch_size": get_transformer_actor_critic_kl_max_batch_size,
             "transformer_actor_critic_kl_max_batch_size_v2": get_transformer_actor_critic_kl_max_batch_size_v2,
             "transformer_actor_critic_kl_max_batch_size_global_sampling": get_transformer_actor_critic_kl_max_batch_size_global_sampling,
+            "autoregressive_transformer_v1": get_autoregressive_transformer_v1,
+            "autoregressive_transformer_v2_improved": get_autoregressive_transformer_v2_improved,
+            "autoregressive_aggressive_policy": get_autoregressive_aggressive_policy,
+            "autoregressive_aggressive_policy_v2": get_autoregressive_aggressive_policy_v2,
 
             "residual_low_entropy": get_residual_low_entropy_config,
             "residual_percentage_fixed_gradients": get_residual_percentage_fixed_gradients_config,
@@ -1151,49 +1200,6 @@ def get_transformer_actor_critic_higher_norm_clip() -> TrainingConfig:
     config.model.hidden_channels = 128  # If used in your architecture
     # PPO settings
     config.ppo.learning_rate = 5e-5
-    config.ppo.ppo_epochs = 2
-    config.ppo.batch_size = 32
-    config.ppo.gradient_clip_norm = 10.0
-    config.ppo.value_loss_coeff = 0.5
-    config.ppo.clip_eps = 0.2
-    config.ppo.gamma = 0.99
-    config.ppo.lam = 0.95
-    # Balanced entropy coefficients
-    config.ppo.entropy_coeff_start = 0.02
-    config.ppo.entropy_coeff_decay = 0.01  # Decays from 0.05 to 0.01 over 10000 episodes
-    config.ppo.entropy_decay_episodes = 10000
-    config.ppo.placement_entropy_coeff = 1
-    config.ppo.edge_entropy_coeff = 1
-    config.ppo.army_entropy_coeff = 1
-    # Adaptive epochs enabled
-    config.ppo.adaptive_epochs = True
-    # Logging and checkpointing
-    config.logging.save_checkpoints = True
-    config.logging.checkpoint_every_n_episodes = 500
-    config.logging.keep_last_n_checkpoints = 25
-    config.logging.auto_resume_latest = True
-    config.logging.experiment_name = "transformer_actor_critic_higher_norm_clip"
-    config.logging.verbose_losses = False
-    config.logging.verbose_rewards = False
-
-    config.logging.print_every_n_episodes = 25
-    # Verification
-    config.verification.enabled = True
-    config.verification.detailed_logging = False
-    config.verification.batch_verification_enabled = False
-    config.verification.analyze_gradients = True
-    config.verification.analyze_weight_changes = True
-    return config
-
-def get_transformer_actor_critic_higher_norm_clip() -> TrainingConfig:
-    """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
-    config = TrainingConfig()
-    # Larger transformer model
-    config.model.model_type = "transformer_actor_critic"
-    config.model.embed_dim = 128
-    config.model.hidden_channels = 128  # If used in your architecture
-    # PPO settings
-    config.ppo.learning_rate = 5e-5
     config.ppo.ppo_epochs = 4
     config.ppo.batch_size = 32
     config.ppo.gradient_clip_norm = 50.0
@@ -1215,7 +1221,7 @@ def get_transformer_actor_critic_higher_norm_clip() -> TrainingConfig:
     config.logging.checkpoint_every_n_episodes = 500
     config.logging.keep_last_n_checkpoints = 25
     config.logging.auto_resume_latest = True
-    config.logging.experiment_name = "transformer_actor_critic_higher_norm_clip_v2"
+    config.logging.experiment_name = "transformer_actor_critic_higher_norm_clip"
     config.logging.verbose_losses = False
     config.logging.verbose_rewards = False
 
@@ -1315,6 +1321,61 @@ def get_transformer_actor_critic_kl_max_batch_size_v2() -> TrainingConfig:
     config.verification.analyze_weight_changes = True
     return config
 
+def get_autoregressive_transformer_v1() -> TrainingConfig:
+    """Autoregressive Transformer architecture with KL-based early stopping and large batch size.
+    
+    This config is designed for the NEW autoregressive transformer architecture (post-refactoring).
+    Uses 128D embeddings, 256 batch size, adaptive KL-based PPO epochs.
+    Fresh start - not compatible with old v2 checkpoints.
+    """
+    config = TrainingConfig()
+    # Autoregressive transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128
+    
+    # PPO settings optimized for large batch
+    config.ppo.learning_rate = 1e-4
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 256
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+    
+    # Balanced entropy coefficients
+    config.ppo.entropy_coeff_start = 0.001
+    config.ppo.entropy_coeff_decay = 0.001
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 1
+    config.ppo.edge_entropy_coeff = 1
+    config.ppo.army_entropy_coeff = 1
+    
+    # Adaptive epochs with KL divergence early stopping
+    config.ppo.adaptive_epochs = True
+    
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 5
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True  # Will work with compatible checkpoints
+    config.logging.experiment_name = "autoregressive_transformer_v1"
+    
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
+    
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+    
+    return config
+
+
 def get_transformer_actor_critic_kl_max_batch_size_global_sampling() -> TrainingConfig:
     """Transformer config with larger model and balanced entropy coefficients (0.3 → 0.1)."""
     config = TrainingConfig()
@@ -1362,3 +1423,254 @@ def get_transformer_actor_critic_kl_max_batch_size_global_sampling() -> Training
     config.verification.analyze_gradients = True
     config.verification.analyze_weight_changes = True
     return config
+
+
+def get_autoregressive_transformer_v2_improved() -> TrainingConfig:
+    """
+    Improved Autoregressive Transformer V2 - Based on TensorBoard Analysis
+
+    Fixes identified from analysis:
+    - Reduced learning rate by 50% (1e-4 -> 5e-5) to fix high KL divergence
+    - Reduced entropy coefficients by 30% to encourage more decisive actions
+    - Increased batch size from 256 to 384 for more stable gradients
+    - Aggressive reward shaping to encourage attacking behavior
+    """
+    config = TrainingConfig()
+
+    # Autoregressive transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128
+
+    # 🎯 KEY FIX #1: Reduced learning rate by 50%
+    config.ppo.learning_rate = 5e-5  # Was 1e-4, reduced due to high KL divergence
+    config.ppo.ppo_epochs = 8
+
+    # 🎯 KEY FIX #2: Increased batch size for stability
+    config.ppo.batch_size = 48  # Increased from 24 (current in RLGNNAgent)
+
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+
+    # 🎯 KEY FIX #3: Reduced entropy coefficients by 30%
+    config.ppo.entropy_coeff_start = 0.0007  # Was 0.001, reduced by 30%
+    config.ppo.entropy_coeff_decay = 0.0007
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 0.7  # Was 1.0, reduced by 30%
+    config.ppo.edge_entropy_coeff = 0.7  # Was 1.0, reduced by 30%
+    config.ppo.army_entropy_coeff = 0.7  # Was 1.0, reduced by 30%
+
+    # KL threshold for early stopping
+    config.ppo.kl_threshold = 0.02
+    config.ppo.adaptive_epochs = True
+
+    # 🎯 KEY FIX #4: Aggressive reward shaping (already configured in GameConfig)
+    # These are now 10x higher in the default GameConfig to encourage aggression
+
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 100
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = False  # Start fresh
+    config.logging.experiment_name = "autoregressive_transformer_v2_improved"
+
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
+
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = True
+
+    return config
+
+
+def get_autoregressive_aggressive_policy() -> TrainingConfig:
+    """
+    Autoregressive Transformer with Extremely Aggressive Reward Shaping
+
+    Designed to train a highly aggressive attacking policy:
+    - Much higher rewards for attacks and territory gains
+    - Stronger penalties for passive play
+    - Tuned entropy for decisive action selection
+    """
+    config = TrainingConfig()
+
+    # Autoregressive transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128
+
+    # Conservative PPO settings for stable aggressive learning
+    config.ppo.learning_rate = 5e-5
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 48
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.99
+    config.ppo.lam = 0.95
+
+    # Lower entropy for more decisive actions
+    config.ppo.entropy_coeff_start = 0.0005
+    config.ppo.entropy_coeff_decay = 0.0005
+    config.ppo.entropy_decay_episodes = 10000
+    config.ppo.placement_entropy_coeff = 0.6
+    config.ppo.edge_entropy_coeff = 0.6
+    config.ppo.army_entropy_coeff = 0.6
+
+    config.ppo.kl_threshold = 0.02
+    config.ppo.adaptive_epochs = True
+
+    # 🔥 AGGRESSIVE REWARD SHAPING 🔥
+    # Region control - heavily reward expansion
+    config.game.region_gain_reward = 1.0  # 20x original (was 0.05)
+    config.game.region_loss_penalty = 0.1  # 4x original (was 0.025)
+
+    # Continent bonuses
+    config.game.continent_bonus_multiplier = 0.5  # 25x original (was 0.02)
+
+    # Action rewards - encourage attacking
+    config.game.action_base_reward = 0.1  # 20x original (was 0.005)
+    config.game.action_efficiency_multiplier = 0.5  # 25x original (was 0.02)
+
+    # Placement rewards - force aggressive placements
+    config.game.placement_next_to_enemy_bonus = 0.5  # 25x original (was 0.02)
+    config.game.placement_safe_penalty = 0.2  # 20x original (was 0.01)
+
+    # Transfer rewards - encourage moving toward enemies
+    config.game.transfer_proximity_multiplier = 0.1  # 20x original (was 0.005)
+
+    # Multi-side attacks - heavily reward coordinated attacks
+    config.game.multi_side_attack_bonus = 1.0  # 20x original (was 0.05)
+
+    # Overstack penalty - strongly discourage passive play
+    config.game.overstack_penalty_rate = 0.0001  # 20x original (was 0.000005)
+
+    # Momentum reward - reward consecutive attack wins
+    config.game.momentum_multiplier = 2.0
+
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 100
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "autoregressive_aggressive_policy"
+
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
+
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = False
+
+    return config
+
+
+def get_autoregressive_aggressive_policy_v2() -> TrainingConfig:
+    """
+    Autoregressive Transformer V2 - ULTRA AGGRESSIVE Reward Shaping
+
+    This config takes aggression to the next level:
+    - MAXIMIZED rewards for territorial expansion and efficient combat
+    - STRONGER momentum rewards for attack streaks
+    - REDUCED transfer rewards (no defensive positioning)
+    - BOOSTED action and region control rewards
+    - Tuned for decisive, relentless offensive play
+    """
+    config = TrainingConfig()
+
+    # Autoregressive transformer model
+    config.model.model_type = "transformer_actor_critic"
+    config.model.embed_dim = 128
+    config.model.hidden_channels = 128
+
+    # PPO settings - slightly more aggressive learning
+    config.ppo.learning_rate = 7e-5  # Slightly higher than v1
+    config.ppo.ppo_epochs = 8
+    config.ppo.batch_size = 48
+    config.ppo.gradient_clip_norm = 50.0
+    config.ppo.value_loss_coeff = 0.02
+    config.ppo.clip_eps = 0.2
+    config.ppo.gamma = 0.995  # Slightly higher discount for long-term aggression
+    config.ppo.lam = 0.97
+
+    # Very low entropy for maximum decisiveness
+    config.ppo.entropy_coeff_start = 0.0003
+    config.ppo.entropy_coeff_decay = 0.0003
+    config.ppo.entropy_decay_episodes = 8000  # Faster decay
+    config.ppo.placement_entropy_coeff = 0.5
+    config.ppo.edge_entropy_coeff = 0.5
+    config.ppo.army_entropy_coeff = 0.5
+
+    config.ppo.kl_threshold = 0.02
+    config.ppo.adaptive_epochs = True
+
+    # 🔥🔥 ULTRA AGGRESSIVE REWARD SHAPING 🔥🔥
+
+    # Region control - MAXIMIZED for territorial dominance
+    config.game.region_gain_reward = 2.0  # 40x original! (was 0.05)
+    config.game.region_loss_penalty = 0.2  # 8x original (was 0.025)
+
+    # Continent bonuses - HUGE rewards for strategic control
+    config.game.continent_bonus_multiplier = 1.0  # 50x original! (was 0.02)
+
+    # Army dynamics - reward favorable trades heavily
+    config.game.army_destruction_weight = 0.5  # Lower normalization for bigger swings
+
+    # Action rewards - MAXIMIZE attack efficiency rewards
+    config.game.action_base_reward = 0.2  # 40x original! (was 0.005)
+    config.game.action_efficiency_multiplier = 1.0  # 50x original! (was 0.02)
+
+    # Placement rewards - FORCE frontline placements
+    config.game.placement_next_to_enemy_bonus = 1.0  # 50x original! (was 0.02)
+    config.game.placement_safe_penalty = 0.5  # 50x original! (was 0.01)
+
+    # Transfer rewards - MINIMIZE defensive positioning
+    config.game.transfer_proximity_multiplier = 0.05  # 10x original (reduced from v1)
+
+    # Multi-side attacks - HUGE rewards for coordinated strikes
+    config.game.multi_side_attack_bonus = 2.0  # 40x original! (was 0.05)
+
+    # Overstack penalty - MAXIMUM penalty for passive play
+    config.game.overstack_penalty_rate = 0.0002  # 40x original! (was 0.000005)
+
+    # 🚀 BOOSTED MOMENTUM - Reward attack streaks heavily!
+    config.game.momentum_multiplier = 3.0  # 50% higher than v1!
+
+    # Logging and checkpointing
+    config.logging.save_checkpoints = True
+    config.logging.checkpoint_every_n_episodes = 100
+    config.logging.keep_last_n_checkpoints = 25
+    config.logging.auto_resume_latest = True
+    config.logging.experiment_name = "autoregressive_aggressive_policy_v2"
+
+    config.logging.verbose_losses = False
+    config.logging.verbose_rewards = False
+    config.logging.print_every_n_episodes = 25
+
+    # Verification
+    config.verification.enabled = True
+    config.verification.detailed_logging = False
+    config.verification.batch_verification_enabled = False
+    config.verification.analyze_gradients = True
+    config.verification.analyze_weight_changes = False
+
+    return config
+
+# Add momentum_multiplier to GameConfig
+def patch_game_config_for_momentum():
+    from dataclasses import fields, Field
+    if not any(f.name == 'momentum_multiplier' for f in fields(GameConfig)):
+        GameConfig.momentum_multiplier = 1.0
+patch_game_config_for_momentum()

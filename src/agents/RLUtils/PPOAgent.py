@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn.functional as f
 from typing import Optional, TYPE_CHECKING
@@ -8,6 +7,7 @@ from src.game.Phase import Phase
 from src.agents.RLUtils.RLUtils import RolloutBuffer, compute_entropy, compute_gae, compute_individual_log_probs
 from src.agents.RLUtils.PPOVerification import PPOVerifier
 from src.agents.RLUtils.PopArt import PopArt
+import time
 
 if TYPE_CHECKING:
     from src.agents.RLUtils.CheckpointManager import CheckpointManager
@@ -170,6 +170,9 @@ class PPOAgent:
         return total ** (1.0 / norm_type)
 
     def update(self, buffer: RolloutBuffer, last_value, agent):
+        ppo_update_start_time = time.time()
+        epoch_times = []
+
         torch.autograd.set_detect_anomaly(False)
 
         if buffer.size() == 0:
@@ -177,9 +180,41 @@ class PPOAgent:
 
         device = next(self.policy.parameters()).device
 
+        # DIAGNOSTIC: Check buffer consistency before processing
+        buffer_diagnostics = {
+            'starting_node_features': len(buffer.starting_node_features_list),
+            'starting_edge_features': len(buffer.starting_edge_features),
+            'end_features': len(buffer.end_features_list),
+            'end_edge_features': len(buffer.end_edge_features),
+            'rewards': len(buffer.rewards),
+            'values': len(buffer.values),
+            'dones': len(buffer.dones),
+            'placements': len(buffer.placements),
+            'attacks': len(buffer.attacks),
+            'placement_log_probs': len(buffer.placement_log_probs),
+            'attack_log_probs': len(buffer.attack_log_probs),
+            'ownership_masks': len(buffer.ownership_masks),
+            'armies_left': len(buffer.armies_left),
+        }
+        
+        # Check for inconsistencies
+        sizes = set(buffer_diagnostics.values())
+        if len(sizes) > 1:
+            print(f"\n[PPO] ERROR: Buffer size mismatch detected!")
+            for key, size in sorted(buffer_diagnostics.items()):
+                print(f"  {key}: {size}")
+            print()
+
         rewards = buffer.get_rewards().to(device)
         values = buffer.get_values().to(device)
         dones = buffer.get_dones().to(device)
+
+        # Validate rewards, values, dones have consistent lengths
+        if not (rewards.shape[0] == values.shape[0] == dones.shape[0]):
+            raise RuntimeError(
+                f"Buffer consistency error: rewards ({rewards.shape[0]}), values ({values.shape[0]}), "
+                f"and dones ({dones.shape[0]}) must have the same length"
+            )
 
         if isinstance(last_value, torch.Tensor):
             last_value_tensor = last_value.detach().to(device=device, dtype=values.dtype)
@@ -205,6 +240,28 @@ class PPOAgent:
         starting_edge_features = buffer.get_starting_edge_features().to(device)
         end_node_features = buffer.get_end_features().to(device)
         end_edge_features = buffer.get_end_edge_features().to(device)
+        
+        # Validate feature dimensions match batch_size
+        if starting_node_features.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: starting_node_features has {starting_node_features.shape[0]} entries "
+                f"but batch_size (from rewards) is {batch_size}"
+            )
+        if starting_edge_features.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: starting_edge_features has {starting_edge_features.shape[0]} entries "
+                f"but batch_size is {batch_size}"
+            )
+        if end_node_features.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: end_node_features has {end_node_features.shape[0]} entries "
+                f"but batch_size is {batch_size}"
+            )
+        if end_edge_features.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: end_edge_features has {end_edge_features.shape[0]} entries "
+                f"but batch_size is {batch_size}"
+            )
 
         ownership_mask = buffer.get_ownership_mask()
         if ownership_mask is None:
@@ -213,6 +270,12 @@ class PPOAgent:
             ownership_mask = ownership_mask.to(device)
             if ownership_mask.dim() == 1 and batch_size > 1:
                 ownership_mask = ownership_mask.unsqueeze(0).expand(batch_size, -1)
+            # Validate ownership mask matches batch_size
+            if ownership_mask.shape[0] != batch_size:
+                raise RuntimeError(
+                    f"Buffer consistency error: ownership_mask has {ownership_mask.shape[0]} entries "
+                    f"but batch_size is {batch_size}"
+                )
 
         armies_left = buffer.get_armies_left()
         if armies_left.numel() == 0:
@@ -220,18 +283,33 @@ class PPOAgent:
         else:
             armies_left_tensor = armies_left.to(device=device, dtype=starting_node_features.dtype)
             armies_left_tensor = torch.where(armies_left_tensor < 0, torch.zeros(1, device=device, dtype=armies_left_tensor.dtype), armies_left_tensor)
+            # Validate armies_left matches batch_size
+            if armies_left_tensor.shape[0] != batch_size:
+                raise RuntimeError(
+                    f"Buffer consistency error: armies_left_tensor has {armies_left_tensor.shape[0]} entries "
+                    f"but batch_size is {batch_size}"
+                )
 
         placements_tensor = buffer.get_placements()
         if placements_tensor.numel() == 0:
             placements_list = [[] for _ in range(batch_size)]
         else:
             placements_cpu = placements_tensor.cpu()
+            # Trim placements_tensor if needed
+            if placements_cpu.shape[0] > batch_size:
+                print(f"[PPO] WARNING: Trimming placements from {placements_cpu.shape[0]} to {batch_size}")
+                placements_cpu = placements_cpu[:batch_size]
             placements_list = []
             for row in placements_cpu:
                 valid = row[row >= 0].tolist()
                 placements_list.append(valid)
 
         attacks_data = buffer.get_attacks()
+        # Trim attacks_data if it's a list and too long
+        if isinstance(attacks_data, list) and len(attacks_data) > batch_size:
+            print(f"[PPO] WARNING: Trimming attacks_data from {len(attacks_data)} to {batch_size}")
+            attacks_data = attacks_data[:batch_size]
+        
         if batch_size == 1:
             if isinstance(attacks_data, list):
                 attacks_for_policy = attacks_data[0] if len(attacks_data) > 0 else {}
@@ -247,6 +325,18 @@ class PPOAgent:
 
         old_placement_log_probs = buffer.get_placement_log_probs()
         old_attack_log_probs = buffer.get_attack_log_probs()
+        
+        # Validate old log probs match batch_size
+        if old_placement_log_probs.numel() > 0 and old_placement_log_probs.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: old_placement_log_probs has {old_placement_log_probs.shape[0]} entries "
+                f"but batch_size is {batch_size}"
+            )
+        if old_attack_log_probs.numel() > 0 and old_attack_log_probs.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Buffer consistency error: old_attack_log_probs has {old_attack_log_probs.shape[0]} entries "
+                f"but batch_size is {batch_size}"
+            )
 
         if old_placement_log_probs.requires_grad:
             raise RuntimeError(
@@ -275,8 +365,18 @@ class PPOAgent:
 
         self.policy.train()
 
+        # Track KL divergence for early stopping
+        kl_divergences = []
+        early_stop_triggered = False
+
         for epoch in range(self.ppo_epochs):
+            epoch_start_time = time.time()
             self.optimizer.zero_grad(set_to_none=True)
+
+            # CRITICAL FIX: Use eval mode for forward pass to eliminate dropout noise
+            # Gradients still flow because we're not in torch.no_grad()
+            # This ensures deterministic policy evaluation for stable training
+            self.policy.eval()
 
             recompute = self.policy.recompute_turn_logprobs(
                 starting_node_features,
@@ -313,16 +413,20 @@ class PPOAgent:
 
             placement_entropy = torch.tensor(recompute.get("placement_entropy", 0.0), device=device, dtype=returns.dtype)
             attack_entropy = torch.tensor(recompute.get("attack_entropy", 0.0), device=device, dtype=returns.dtype)
-            joint_entropy = torch.tensor(recompute.get("joint_entropy", 0.0), device=device, dtype=returns.dtype)
+
+            # Calculate weighted entropy components
+            weighted_placement_entropy = self.placement_entropy_coeff * placement_entropy
+            weighted_attack_entropy = self.edge_entropy_coeff * attack_entropy
 
             entropy_loss = (
-                self.placement_entropy_coeff * placement_entropy
-                + self.edge_entropy_coeff * attack_entropy
-                + self.army_entropy_coeff * joint_entropy
+                weighted_placement_entropy
+                + weighted_attack_entropy
             )
 
-            total_loss = policy_loss + self.value_loss_coeff * value_loss - entropy_loss
+            total_loss = policy_loss + self.value_loss_coeff * value_loss - self.entropy_coeff_start * entropy_loss
 
+            # Switch to train mode for backward pass (allows dropout in gradient computation if needed)
+            self.policy.train()
             total_loss.backward()
 
             parameters = [p for p in self.policy.parameters() if p.grad is not None]
@@ -350,16 +454,91 @@ class PPOAgent:
 
             self.optimizer.step()
 
+            # Compute KL divergence AFTER the optimizer step to measure actual policy change
+            # Use the same forward pass results (already in eval mode, no dropout)
+            with torch.no_grad():
+                self.policy.eval()
+
+                recompute_after_update = self.policy.recompute_turn_logprobs(
+                    starting_node_features,
+                    starting_edge_features,
+                    ownership_mask,
+                    placements_list,
+                    attacks_for_policy,
+                    armies_left_tensor,
+                    action=None,
+                )
+
+                new_place_logps_after = recompute_after_update.get("logp", torch.empty((batch_size, 0), device=device, dtype=returns.dtype))
+                if isinstance(new_place_logps_after, torch.Tensor):
+                    new_place_logps_after = new_place_logps_after.to(device=device, dtype=returns.dtype)
+                else:
+                    new_place_logps_after = torch.empty((batch_size, 0), device=device, dtype=returns.dtype)
+
+                new_attack_logps_after = recompute_after_update.get("attack_logp", torch.empty((batch_size, 0), device=device, dtype=returns.dtype))
+                if isinstance(new_attack_logps_after, torch.Tensor):
+                    new_attack_logps_after = new_attack_logps_after.to(device=device, dtype=returns.dtype)
+                else:
+                    new_attack_logps_after = torch.empty((batch_size, 0), device=device, dtype=returns.dtype)
+
+                joint_logp_after_update = _sum_log_probs(new_place_logps_after, batch_size) + _sum_log_probs(new_attack_logps_after, batch_size)
+
+                # KL divergence: measures change from original policy to updated policy
+                kl_div = (joint_logp_old - joint_logp_after_update).mean().item()
+                kl_divergences.append(kl_div)
+
+            # Timing for this epoch
+            epoch_duration = time.time() - epoch_start_time
+            epoch_times.append(epoch_duration)
+            print(f"[PPO] Epoch {epoch+1}/{self.ppo_epochs} took {epoch_duration:.4f} seconds (avg per step: {epoch_duration/batch_size:.6f} s), KL div: {kl_div:.6f}")
+
+            # Log losses and stats per epoch
             if hasattr(agent, "total_rewards"):
                 agent.total_rewards["policy_loss"] = policy_loss.item()
                 agent.total_rewards["value_loss"] = value_loss.item()
                 agent.total_rewards["total_loss"] = total_loss.item()
                 agent.total_rewards["ppo_ratio"] = ratio.mean().item()
+                agent.total_rewards["kl_divergence"] = kl_div
+
+                # Log entropy components and their weighted versions
+                placement_entropy_val = placement_entropy.item()
+                attack_entropy_val = attack_entropy.item()
+
+                agent.total_rewards["placement_entropy"] = placement_entropy_val
+                agent.total_rewards["attack_entropy"] = attack_entropy_val
+                agent.total_rewards["weighted_placement_entropy"] = weighted_placement_entropy.item()
+                agent.total_rewards["weighted_attack_entropy"] = weighted_attack_entropy.item()
+                agent.total_rewards["total_entropy_loss"] = entropy_loss.item()
+
+                # Log entropy coefficients for reference
+                agent.total_rewards["placement_entropy_coeff"] = self.placement_entropy_coeff
+                agent.total_rewards["edge_entropy_coeff"] = self.edge_entropy_coeff
+
                 if self.monitor_gradient_norm:
                     agent.total_rewards["grad_norm_raw"] = grad_norm_raw
                     agent.total_rewards["grad_norm_post_scale"] = grad_norm_post_scale
                     agent.total_rewards["grad_norm_clipped"] = clipped_norm
                     agent.total_rewards["grad_scale_factor"] = grad_scale
 
-        if self.checkpoint_manager and self.checkpoint_manager.should_save_checkpoint(agent.game_number):
-            self.checkpoint_manager.save_checkpoint(agent, agent.game_number)
+            # Check if KL divergence exceeds threshold AFTER logging
+            if kl_div > self.kl_threshold:
+                print(f"[PPO] Early stopping at epoch {epoch+1}: KL divergence {kl_div:.6f} exceeds threshold {self.kl_threshold}")
+                early_stop_triggered = True
+                # Log the early stopping event
+                if hasattr(agent, "total_rewards"):
+                    agent.total_rewards["early_stop_epoch"] = epoch + 1
+                    agent.total_rewards["final_kl_divergence"] = kl_div
+                break
+
+        # Log summary statistics about KL divergence and early stopping
+        if hasattr(agent, "total_rewards"):
+            agent.total_rewards["mean_kl_divergence"] = sum(kl_divergences) / len(kl_divergences) if kl_divergences else 0.0
+            agent.total_rewards["max_kl_divergence"] = max(kl_divergences) if kl_divergences else 0.0
+            agent.total_rewards["epochs_completed"] = len(kl_divergences)
+            agent.total_rewards["early_stopped"] = early_stop_triggered
+
+        # PPO update timing
+        total_ppo_update_time = time.time() - ppo_update_start_time
+        print(f"[PPO] Total PPO update took {total_ppo_update_time:.4f} seconds (avg per step: {total_ppo_update_time/batch_size:.6f} s)")
+        if early_stop_triggered:
+            print(f"[PPO] Early stopping summary: Completed {len(kl_divergences)} epochs, mean KL: {sum(kl_divergences) / len(kl_divergences):.6f}")

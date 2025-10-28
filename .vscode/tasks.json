@@ -16,7 +16,7 @@
                 "-map",
                 "world",
                 "-config",
-                "transformer_actor_critic_kl_max_batch_size_global_sampling"
+                "autoregressive_transformer_v1"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
