@@ -184,7 +184,7 @@ async def create_transcription(
         # Format response based on requested format
         if response_format == "text":
             # Simple text format
-            text = " ".join([segment.get("text", "") for segment in result.get("segments", [])])
+            text = extract_text_from_segments(result.get("segments", []))
             return text
         
         elif response_format == "srt":
@@ -207,14 +207,14 @@ async def create_transcription(
                 "task": "transcribe",
                 "language": result.get("language", language or "en"),
                 "duration": duration,
-                "text": " ".join([segment.get("text", "") for segment in segments]),
+                "text": extract_text_from_segments(segments),
                 "segments": segments,
                 "words": result.get("word_segments", []),
             })
         
         else:  # json (default)
             # Standard JSON format (OpenAI compatible)
-            text = " ".join([segment.get("text", "") for segment in result.get("segments", [])])
+            text = extract_text_from_segments(result.get("segments", []))
             return JSONResponse(content={
                 "text": text
             })
@@ -228,6 +228,11 @@ async def create_transcription(
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
             logger.info("Temporary file cleaned up")
+
+
+def extract_text_from_segments(segments: list) -> str:
+    """Extract and concatenate text from segments."""
+    return " ".join([segment.get("text", "") for segment in segments])
 
 
 def format_as_srt(segments: list) -> str:
