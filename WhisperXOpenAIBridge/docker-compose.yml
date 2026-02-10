@@ -1,0 +1,14 @@
+services:
+  whisperx-bridge:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - WHISPERX_MODEL=base
+      - WHISPERX_DEVICE=cpu
+      - WHISPERX_COMPUTE_TYPE=int8
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+    volumes:
+      - ./models:/root/.cache/whisper
+    restart: unless-stopped
