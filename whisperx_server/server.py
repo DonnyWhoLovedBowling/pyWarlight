@@ -199,12 +199,14 @@ async def create_transcription(
         
         elif response_format == "verbose_json":
             # Verbose JSON format with all details
+            segments = result.get("segments", [])
+            duration = segments[-1].get("end", 0.0) if segments else 0.0
             return JSONResponse(content={
                 "task": "transcribe",
                 "language": result.get("language", language or "en"),
-                "duration": result.get("segments", [{}])[-1].get("end", 0.0) if result.get("segments") else 0.0,
-                "text": " ".join([segment.get("text", "") for segment in result.get("segments", [])]),
-                "segments": result.get("segments", []),
+                "duration": duration,
+                "text": " ".join([segment.get("text", "") for segment in segments]),
+                "segments": segments,
                 "words": result.get("word_segments", []),
             })
         
