@@ -222,7 +222,7 @@ async def create_transcription(
     
     finally:
         # Clean up temporary file
-        if temp_file and os.path.exists(temp_file_path):
+        if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
             logger.info("Temporary file cleaned up")
 
