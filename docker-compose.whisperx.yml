@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  whisperx-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisperx
+    ports:
+      - "8000:8000"
+    environment:
+      - WHISPER_MODEL=base
+      - HF_TOKEN=${HF_TOKEN:-}
+      - BATCH_SIZE=16
+    volumes:
+      - model-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  model-cache:
