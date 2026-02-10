@@ -3,6 +3,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional, List
+from contextlib import asynccontextmanager
 import tempfile
 import os
 from pathlib import Path
@@ -15,13 +16,6 @@ from .transcription import WhisperXService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="WhisperX OpenAI Bridge",
-    description="OpenAI-compatible API for WhisperX speech recognition",
-    version="0.1.0"
-)
-
 # Initialize WhisperX service
 whisperx_service = WhisperXService(
     model_name=config.whisperx.model,
@@ -32,12 +26,25 @@ whisperx_service = WhisperXService(
 )
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Load models on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events"""
+    # Startup
     logger.info("Loading WhisperX model...")
     whisperx_service.load_model()
     logger.info("WhisperX model loaded successfully")
+    yield
+    # Shutdown (if needed)
+    logger.info("Shutting down...")
+
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="WhisperX OpenAI Bridge",
+    description="OpenAI-compatible API for WhisperX speech recognition",
+    version="0.1.0",
+    lifespan=lifespan
+)
 
 
 @app.get("/health")

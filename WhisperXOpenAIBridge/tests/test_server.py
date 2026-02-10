@@ -42,7 +42,11 @@ def test_transcription_endpoint_missing_file(mock_service, client):
 
 
 @patch("src.whisperx_bridge.server.whisperx_service")
-def test_transcription_endpoint_success(mock_service, client):
+@patch("builtins.open", create=True)
+@patch("os.path.exists")
+@patch("os.remove")
+@patch("os.rmdir")
+def test_transcription_endpoint_success(mock_rmdir, mock_remove, mock_exists, mock_open, mock_service, client):
     """Test successful transcription"""
     # Mock the transcription service
     mock_service.transcribe.return_value = {
@@ -53,6 +57,10 @@ def test_transcription_endpoint_success(mock_service, client):
         "text": "Hello world",
         "language": "en"
     }
+    
+    # Mock file operations
+    mock_exists.return_value = True
+    mock_open.return_value.__enter__.return_value.write = Mock()
     
     # Create a mock file
     audio_content = b"fake audio content"
@@ -65,6 +73,8 @@ def test_transcription_endpoint_success(mock_service, client):
         data=data
     )
     
-    # Note: This might fail in actual test without mocking file I/O properly
-    # but it demonstrates the test structure
-    assert response.status_code in [200, 500]  # Allow either success or error in mock
+    # With proper mocking, this should succeed
+    assert response.status_code == 200
+    result = response.json()
+    assert "text" in result
+    assert result["text"] == "Hello world"
