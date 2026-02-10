@@ -138,7 +138,6 @@ async def create_transcription(
     model_instance = initialize_models(whisper_model, device, compute_type)
     
     # Save uploaded file to temporary location
-    temp_file = None
     temp_file_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
